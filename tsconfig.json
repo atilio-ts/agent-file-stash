@@ -8,6 +8,6 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "declaration": true,
-    "types": ["bun-types"]
+    "types": ["node"]
   }
 }

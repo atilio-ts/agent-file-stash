@@ -1,15 +1,12 @@
-#!/usr/bin/env bun
+import { createCache } from "cachebro-sdk";
+import { resolve, join } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { startMcpServer } from "./mcp.js";
 
-const command = process.argv[2];
+const CLI_STATUS_SESSION = "cli-status";
 
-if (!command || command === "serve") {
-  await startMcpServer();
-} else if (command === "status") {
-  const { createCache } = await import("@turso/cachebro");
-  const { resolve, join } = await import("path");
-  const { existsSync } = await import("fs");
-
+async function runStatus(): Promise<void> {
   const cacheDir = resolve(process.env.CACHEBRO_DIR ?? ".cachebro");
   const dbPath = join(cacheDir, "cache.db");
 
@@ -18,7 +15,7 @@ if (!command || command === "serve") {
     process.exit(0);
   }
 
-  const { cache } = createCache({ dbPath, sessionId: "cli-status" });
+  const { cache } = createCache({ dbPath, sessionId: CLI_STATUS_SESSION });
   await cache.init();
   const stats = await cache.getStats();
 
@@ -27,20 +24,16 @@ if (!command || command === "serve") {
   console.log(`  Tokens saved (total):   ~${stats.tokensSaved.toLocaleString()}`);
 
   await cache.close();
-} else if (command === "init") {
-  const { existsSync, readFileSync, writeFileSync, mkdirSync } = await import("fs");
-  const { join } = await import("path");
-  const { homedir } = await import("os");
+}
 
+async function runInit(): Promise<void> {
   const home = homedir();
 
-  // mcpServers format (Claude Code, Cursor, Windsurf)
   const mcpServersEntry = {
     command: "npx",
     args: ["cachebro", "serve"],
   };
 
-  // opencode format (mcp key, command is a single array)
   const opencodeMcpEntry = {
     type: "local" as const,
     command: ["npx", "cachebro", "serve"],
@@ -72,11 +65,10 @@ if (!command || command === "serve") {
   let configured = 0;
 
   for (const target of targets) {
-    // Only configure tools that are already installed (config dir exists)
     const dir = join(target.path, "..");
     if (!existsSync(dir)) continue;
 
-    let config: any = {};
+    let config: Record<string, unknown> = {};
     if (existsSync(target.path)) {
       try {
         config = JSON.parse(readFileSync(target.path, "utf-8"));
@@ -85,14 +77,14 @@ if (!command || command === "serve") {
       }
     }
 
-    if (config[target.key]?.cachebro) {
+    const section = config[target.key] as Record<string, unknown> | undefined;
+    if (section?.cachebro) {
       console.log(`  ${target.name}: already configured`);
       configured++;
       continue;
     }
 
-    config[target.key] = config[target.key] ?? {};
-    config[target.key].cachebro = target.entry;
+    config[target.key] = { ...section, cachebro: target.entry };
     writeFileSync(target.path, JSON.stringify(config, null, 2) + "\n");
     console.log(`  ${target.name}: configured (${target.path})`);
     configured++;
@@ -104,7 +96,9 @@ if (!command || command === "serve") {
   } else {
     console.log(`\nDone! Restart your editor to pick up cachebro.`);
   }
-} else if (command === "help" || command === "--help") {
+}
+
+function runHelp(): void {
   console.log(`cachebro - Agent file cache with diff tracking
 
 Usage:
@@ -115,6 +109,18 @@ Usage:
 
 Environment:
   CACHEBRO_DIR       Cache directory (default: .cachebro)`);
+}
+
+const command = process.argv[2];
+
+if (!command || command === "serve") {
+  await startMcpServer();
+} else if (command === "status") {
+  await runStatus();
+} else if (command === "init") {
+  await runInit();
+} else if (command === "help" || command === "--help") {
+  runHelp();
 } else {
   console.error(`Unknown command: ${command}. Run 'cachebro help' for usage.`);
   process.exit(1);

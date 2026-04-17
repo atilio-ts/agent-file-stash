@@ -14,118 +14,146 @@ export interface DiffResult {
   changedNewLines: Set<number>;
 }
 
+type DiffLine = { type: "keep" | "add" | "remove"; line: string; oldLine: number; newLine: number };
+
+const CONTEXT = 3;
+
 export function computeDiff(oldContent: string, newContent: string, filePath: string): DiffResult {
   const oldLines = oldContent.split("\n");
   const newLines = newContent.split("\n");
-
-  // LCS-based diff
   const lcs = longestCommonSubsequence(oldLines, newLines);
 
-  const hunks: string[] = [];
-  let oldIdx = 0;
-  let newIdx = 0;
-  let lcsIdx = 0;
-  let linesChanged = 0;
-
-  // Collect raw diff lines
-  const rawLines: Array<{ type: "keep" | "add" | "remove"; line: string; oldLine: number; newLine: number }> = [];
-
-  while (oldIdx < oldLines.length || newIdx < newLines.length) {
-    if (lcsIdx < lcs.length && oldIdx < oldLines.length && oldLines[oldIdx] === lcs[lcsIdx] &&
-        newIdx < newLines.length && newLines[newIdx] === lcs[lcsIdx]) {
-      rawLines.push({ type: "keep", line: oldLines[oldIdx], oldLine: oldIdx + 1, newLine: newIdx + 1 });
-      oldIdx++;
-      newIdx++;
-      lcsIdx++;
-    } else if (newIdx < newLines.length && (lcsIdx >= lcs.length || newLines[newIdx] !== lcs[lcsIdx])) {
-      rawLines.push({ type: "add", line: newLines[newIdx], oldLine: oldIdx + 1, newLine: newIdx + 1 });
-      newIdx++;
-      linesChanged++;
-    } else if (oldIdx < oldLines.length && (lcsIdx >= lcs.length || oldLines[oldIdx] !== lcs[lcsIdx])) {
-      rawLines.push({ type: "remove", line: oldLines[oldIdx], oldLine: oldIdx + 1, newLine: newIdx + 1 });
-      oldIdx++;
-      linesChanged++;
-    }
-  }
-
-  // Collect which lines in the new file were changed
-  const changedNewLines = new Set<number>();
-  for (const rl of rawLines) {
-    if (rl.type === "add") changedNewLines.add(rl.newLine);
-    // For removals, mark the adjacent new line as affected
-    if (rl.type === "remove") changedNewLines.add(rl.newLine);
-  }
+  const { rawLines, linesChanged } = buildRawLines(oldLines, newLines, lcs);
+  const changedNewLines = collectChangedLines(rawLines);
 
   if (linesChanged === 0) {
     return { diff: "", linesChanged: 0, hasChanges: false, changedNewLines };
   }
 
-  // Group into hunks with 3 lines of context
-  const CONTEXT = 3;
-  const hunkGroups: typeof rawLines[] = [];
-  let currentHunk: typeof rawLines = [];
+  const hunkGroups = groupIntoHunks(rawLines);
+  const diff = formatDiff(hunkGroups, filePath);
+
+  return { diff, linesChanged, hasChanges: true, changedNewLines };
+}
+
+function buildRawLines(
+  oldLines: string[],
+  newLines: string[],
+  lcs: string[],
+): { rawLines: DiffLine[]; linesChanged: number } {
+  const rawLines: DiffLine[] = [];
+  let oldIdx = 0, newIdx = 0, lcsIdx = 0, linesChanged = 0;
+
+  while (oldIdx < oldLines.length || newIdx < newLines.length) {
+    const atLcsMatch =
+      lcsIdx < lcs.length &&
+      oldIdx < oldLines.length && oldLines[oldIdx] === lcs[lcsIdx] &&
+      newIdx < newLines.length && newLines[newIdx] === lcs[lcsIdx];
+
+    if (atLcsMatch) {
+      rawLines.push({ type: "keep", line: oldLines[oldIdx], oldLine: oldIdx + 1, newLine: newIdx + 1 });
+      oldIdx++; newIdx++; lcsIdx++;
+    } else if (newIdx < newLines.length && (lcsIdx >= lcs.length || newLines[newIdx] !== lcs[lcsIdx])) {
+      rawLines.push({ type: "add", line: newLines[newIdx], oldLine: oldIdx + 1, newLine: newIdx + 1 });
+      newIdx++; linesChanged++;
+    } else {
+      rawLines.push({ type: "remove", line: oldLines[oldIdx], oldLine: oldIdx + 1, newLine: newIdx + 1 });
+      oldIdx++; linesChanged++;
+    }
+  }
+
+  return { rawLines, linesChanged };
+}
+
+function collectChangedLines(rawLines: DiffLine[]): Set<number> {
+  const changed = new Set<number>();
+  for (const rl of rawLines) {
+    if (rl.type === "add") {
+      changed.add(rl.newLine);
+    }
+  }
+  return changed;
+}
+
+function groupIntoHunks(rawLines: DiffLine[]): DiffLine[][] {
+  const groups: DiffLine[][] = [];
+  let current: DiffLine[] = [];
   let lastChangeIdx = -999;
 
   for (let i = 0; i < rawLines.length; i++) {
     const line = rawLines[i];
-    if (line.type !== "keep") {
-      // If this change is far from the last, start a new hunk
-      if (i - lastChangeIdx > CONTEXT * 2 + 1 && currentHunk.length > 0) {
-        hunkGroups.push(currentHunk);
-        currentHunk = [];
-        // Add leading context
-        for (let c = Math.max(0, i - CONTEXT); c < i; c++) {
-          currentHunk.push(rawLines[c]);
-        }
-      } else if (currentHunk.length === 0) {
-        // First hunk, add leading context
-        for (let c = Math.max(0, i - CONTEXT); c < i; c++) {
-          currentHunk.push(rawLines[c]);
-        }
+
+    if (line.type === "keep") {
+      if (current.length > 0 && i - lastChangeIdx <= CONTEXT) {
+        current.push(line);
       }
-      // Add all lines between last change context end and this change
-      const contextEnd = lastChangeIdx + CONTEXT + 1;
-      for (let c = Math.max(contextEnd, currentHunk.length > 0 ? i : 0); c < i; c++) {
-        if (!currentHunk.includes(rawLines[c])) {
-          currentHunk.push(rawLines[c]);
-        }
-      }
-      currentHunk.push(line);
-      lastChangeIdx = i;
-    } else if (i - lastChangeIdx <= CONTEXT && currentHunk.length > 0) {
-      currentHunk.push(line);
+      continue;
     }
-  }
-  if (currentHunk.length > 0) {
-    hunkGroups.push(currentHunk);
+
+    const isNewHunk = current.length > 0 && i - lastChangeIdx > CONTEXT * 2 + 1;
+    const isFirstHunk = current.length === 0;
+
+    if (isNewHunk) {
+      groups.push(current);
+      current = rawLines.slice(Math.max(0, i - CONTEXT), i);
+    } else if (isFirstHunk) {
+      current = rawLines.slice(Math.max(0, i - CONTEXT), i);
+    } else {
+      fillContextGap(current, rawLines, lastChangeIdx, i);
+    }
+
+    current.push(line);
+    lastChangeIdx = i;
   }
 
-  // Format hunks
+  if (current.length > 0) {
+    groups.push(current);
+  }
+
+  return groups;
+}
+
+function fillContextGap(current: DiffLine[], rawLines: DiffLine[], lastChangeIdx: number, upTo: number): void {
+  const contextEnd = lastChangeIdx + CONTEXT + 1;
+  const inCurrent = new Set(current);
+  for (let c = contextEnd; c < upTo; c++) {
+    if (!inCurrent.has(rawLines[c])) {
+      current.push(rawLines[c]);
+      inCurrent.add(rawLines[c]);
+    }
+  }
+}
+
+function formatDiff(hunkGroups: DiffLine[][], filePath: string): string {
+  const lines: string[] = [`--- a/${filePath}`, `+++ b/${filePath}`];
+
   for (const hunk of hunkGroups) {
     if (hunk.length === 0) continue;
-    const firstLine = hunk[0];
-    const lastLine = hunk[hunk.length - 1];
-    hunks.push(`@@ -${firstLine.oldLine},${lastLine.oldLine - firstLine.oldLine + 1} +${firstLine.newLine},${lastLine.newLine - firstLine.newLine + 1} @@`);
-    for (const line of hunk) {
-      const prefix = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
-      hunks.push(`${prefix}${line.line}`);
+    const first = hunk[0];
+    const oldCount = hunk.filter(dl => dl.type === "keep" || dl.type === "remove").length;
+    const newCount = hunk.filter(dl => dl.type === "keep" || dl.type === "add").length;
+    lines.push(`@@ -${first.oldLine},${oldCount} +${first.newLine},${newCount} @@`);
+    const prefixMap: Record<DiffLine["type"], string> = { add: "+", remove: "-", keep: " " };
+    for (const dl of hunk) {
+      const prefix = prefixMap[dl.type];
+      lines.push(`${prefix}${dl.line}`);
     }
   }
 
-  const header = `--- a/${filePath}\n+++ b/${filePath}`;
-  return {
-    diff: `${header}\n${hunks.join("\n")}`,
-    linesChanged,
-    hasChanges: true,
-    changedNewLines,
-  };
+  return lines.join("\n");
 }
+
+const LCS_LINE_LIMIT = 5000;
 
 function longestCommonSubsequence(a: string[], b: string[]): string[] {
   const m = a.length;
   const n = b.length;
 
-  // Optimize for large files: use Map-based approach for sparse LCS
+  if (m > LCS_LINE_LIMIT || n > LCS_LINE_LIMIT) {
+    // Files too large for O(m×n) LCS — return empty to force a full-content result
+    return [];
+  }
+
   const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
 
   for (let i = 1; i <= m; i++) {
@@ -138,14 +166,12 @@ function longestCommonSubsequence(a: string[], b: string[]): string[] {
     }
   }
 
-  // Backtrack to find the LCS
   const result: string[] = [];
   let i = m, j = n;
   while (i > 0 && j > 0) {
     if (a[i - 1] === b[j - 1]) {
       result.unshift(a[i - 1]);
-      i--;
-      j--;
+      i--; j--;
     } else if (dp[i - 1][j] > dp[i][j - 1]) {
       i--;
     } else {

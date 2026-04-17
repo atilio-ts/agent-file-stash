@@ -4,7 +4,7 @@
 
 # cachebro
 
-File cache with diff tracking for AI coding agents. Powered by [Turso](https://turso.tech), a high-performance embedded database.
+File cache with diff tracking for AI coding agents. Powered by SQLite (`node:sqlite`, built into Node.js 24+).
 
 Agents waste most of their token budget re-reading files they've already seen. cachebro fixes this: on first read it caches the file, on subsequent reads it returns either "unchanged" (one line instead of the whole file) or a compact diff of what changed. Drop-in replacement for file reads that agents adopt on their own.
 
@@ -43,7 +43,7 @@ After edit:   agent reads src/auth.ts → hash changed → returns unified diff 
 Partial read: agent reads lines 50-60 → edit changed line 200 → returns "[unchanged in lines 50-60]"
 ```
 
-The cache persists in a local [Turso](https://turso.tech) (SQLite-compatible) database. Content hashing (SHA-256) detects changes. No network, no external services, no configuration beyond a file path.
+The cache persists in a local SQLite database (Node.js built-in `node:sqlite`, WAL mode). Content hashing (SHA-256) detects changes. No network, no external services, no configuration beyond a file path.
 
 ## Installation
 
@@ -144,11 +144,11 @@ packages/
   cli/     cachebro — batteries-included CLI + MCP server
 ```
 
-**Database:** Single [Turso](https://turso.tech) database file with `file_versions` (content-addressed, keyed by path + hash), `session_reads` (per-session read pointers), and `stats`/`session_stats` tables. Multiple sessions and branch switches are handled correctly — each session tracks which version it last saw.
+**Database:** Single SQLite file (Node.js built-in `node:sqlite`, WAL mode) with `file_versions` (content-addressed, keyed by path + hash), `session_reads` (per-session read pointers), and `stats`/`session_stats` tables. Multiple sessions and branch switches are handled correctly — each session tracks which version it last saw.
 
 **Change detection:** On every read, cachebro hashes the current file content and compares it to the cached hash. Same hash = unchanged. Different hash = compute diff, update cache. No polling, no watchers required for correctness — the hash is the source of truth.
 
-**Token estimation:** `ceil(characters * 0.75)`. Rough but directionally correct for code. Good enough for the "tokens saved" metric.
+**Token estimation:** `ceil(characters / 4)`. Rough but directionally correct for code (~1 token per 4 characters). Good enough for the "tokens saved" metric.
 
 ## License
 

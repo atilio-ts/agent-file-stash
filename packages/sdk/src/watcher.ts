@@ -1,12 +1,12 @@
-import { watch, type FSWatcher } from "fs";
-import { resolve } from "path";
+import { watch as fsWatch, existsSync, type FSWatcher } from "node:fs";
+import { resolve } from "node:path";
 import type { CacheStore } from "./cache.js";
 
 export class FileWatcher {
   private watchers: FSWatcher[] = [];
-  private cache: CacheStore;
-  private debounceTimers = new Map<string, Timer>();
-  private debounceMs: number;
+  private readonly cache: CacheStore;
+  private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly debounceMs: number;
 
   constructor(cache: CacheStore, debounceMs = 100) {
     this.cache = cache;
@@ -16,16 +16,14 @@ export class FileWatcher {
   watch(paths: string[]): void {
     for (const p of paths) {
       const absPath = resolve(p);
-      const watcher = watch(absPath, { recursive: true }, (event, filename) => {
+      const watcher = fsWatch(absPath, { recursive: true }, (event, filename) => {
         if (!filename) return;
         const filePath = resolve(absPath, filename);
 
-        // Skip hidden files, node_modules, .git
         if (filename.startsWith(".") || filename.includes("node_modules") || filename.includes(".git")) {
           return;
         }
 
-        // Debounce rapid changes to the same file
         const existing = this.debounceTimers.get(filePath);
         if (existing) clearTimeout(existing);
 
@@ -33,7 +31,7 @@ export class FileWatcher {
           filePath,
           setTimeout(() => {
             this.debounceTimers.delete(filePath);
-            this.handleChange(event, filePath);
+            this.handleChange(filePath);
           }, this.debounceMs),
         );
       });
@@ -43,26 +41,19 @@ export class FileWatcher {
   }
 
   close(): void {
-    for (const w of this.watchers) {
-      w.close();
-    }
+    for (const w of this.watchers) w.close();
     this.watchers = [];
-    for (const timer of this.debounceTimers.values()) {
-      clearTimeout(timer);
-    }
+    for (const timer of this.debounceTimers.values()) clearTimeout(timer);
     this.debounceTimers.clear();
   }
 
-  private async handleChange(event: string, filePath: string): Promise<void> {
+  private async handleChange(filePath: string): Promise<void> {
     try {
-      const { existsSync } = await import("fs");
-      if (existsSync(filePath)) {
-        await this.cache.onFileChanged(filePath);
-      } else {
+      if (!existsSync(filePath)) {
         await this.cache.onFileDeleted(filePath);
       }
-    } catch {
-      // File may be in a transient state during writes
+    } catch (e: unknown) {
+      process.stderr.write(`[cachebro] watcher error on ${filePath}: ${e instanceof Error ? e.message : String(e)}\n`);
     }
   }
 }

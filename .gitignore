@@ -1,9 +1,15 @@
 node_modules/
 dist/
+bun.lock
 .cachebro/
+.cachebro-sqlite/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
-bun.lockb
 .tmp_test/
+
+temporary
+
+graphify-out
+.mcp.json

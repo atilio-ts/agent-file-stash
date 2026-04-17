@@ -1,7 +1,9 @@
-import { connect } from "@tursodatabase/database";
-import { computeDiff } from "./differ.js";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { computeDiff, type DiffResult } from "./differ.js";
 import type { CacheConfig, CacheStats, FileReadResult } from "./types.js";
-import { createHash } from "crypto";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS file_versions (
@@ -36,18 +38,33 @@ CREATE TABLE IF NOT EXISTS session_stats (
 INSERT OR IGNORE INTO stats (key, value) VALUES ('tokens_saved', 0);
 `;
 
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length * 0.75);
+interface ReadState {
+  absPath: string;
+  currentContent: string;
+  currentHash: string;
+  currentLines: number;
+  isPartial: boolean;
+  rangeStart: number;
+  rangeEnd: number;
+  offset: number;
+  limit: number;
+  now: number;
 }
 
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+const HASH_LENGTH = 16;
+
 function contentHash(content: string): string {
-  return createHash("sha256").update(content).digest("hex").slice(0, 16);
+  return createHash("sha256").update(content).digest("hex").slice(0, HASH_LENGTH);
 }
 
 export class CacheStore {
-  private db: Awaited<ReturnType<typeof connect>> | null = null;
-  private dbPath: string;
-  private sessionId: string;
+  private db: DatabaseSync | null = null;
+  private readonly dbPath: string;
+  private readonly sessionId: string;
   private initialized = false;
 
   constructor(config: CacheConfig) {
@@ -57,12 +74,13 @@ export class CacheStore {
 
   async init(): Promise<void> {
     if (this.initialized) return;
-    this.db = await connect(this.dbPath);
-    await this.db.exec(SCHEMA);
+    this.db = new DatabaseSync(this.dbPath);
+    this.db.exec("PRAGMA journal_mode=WAL");
+    this.db.exec(SCHEMA);
     this.initialized = true;
   }
 
-  private getDb() {
+  private getDb(): DatabaseSync {
     if (!this.db) throw new Error("CacheStore not initialized. Call init() first.");
     return this.db;
   }
@@ -70,172 +88,148 @@ export class CacheStore {
   async readFile(filePath: string, options?: { offset?: number; limit?: number }): Promise<FileReadResult> {
     await this.init();
     const db = this.getDb();
-    const { readFileSync, statSync } = await import("fs");
-    const { resolve } = await import("path");
 
     const absPath = resolve(filePath);
     statSync(absPath); // throws if file doesn't exist
 
     const currentContent = readFileSync(absPath, "utf-8");
     const currentHash = contentHash(currentContent);
-    const allLines = currentContent.split("\n");
-    const currentLines = allLines.length;
-    const now = Date.now();
-
+    const currentLines = currentContent.split("\n").length;
     const offset = options?.offset ?? 0;
     const limit = options?.limit ?? 0;
-    const isPartial = offset > 0 || limit > 0;
+    const rangeStart = offset > 0 ? offset : 1;
 
-    // Extract the requested line range from content
-    const sliceLines = (text: string): string => {
-      if (!isPartial) return text;
-      const lines = text.split("\n");
-      const start = offset > 0 ? offset - 1 : 0; // offset is 1-based
-      const end = limit > 0 ? start + limit : lines.length;
-      return lines.slice(start, end).join("\n");
+    const state: ReadState = {
+      absPath,
+      currentContent,
+      currentHash,
+      currentLines,
+      isPartial: offset > 0 || limit > 0,
+      rangeStart,
+      rangeEnd: limit > 0 ? rangeStart + limit - 1 : currentLines,
+      offset,
+      limit,
+      now: Date.now(),
     };
 
-    const rangeStart = offset > 0 ? offset : 1; // 1-based
-    const rangeEnd = limit > 0 ? rangeStart + limit - 1 : currentLines;
-    const rangeLineCount = rangeEnd - rangeStart + 1;
-
-    // What did THIS session last see for this file?
-    const lastRead = await db.prepare(
+    const lastRead = db.prepare(
       "SELECT hash FROM session_reads WHERE session_id = ? AND path = ?"
-    ).all(this.sessionId, absPath);
+    ).all(this.sessionId, absPath) as { hash: string }[];
 
-    if (lastRead.length > 0) {
-      const lastHash = (lastRead[0] as any).hash as string;
+    if (lastRead.length === 0) {
+      return this.handleFirstRead(db, state);
+    }
 
-      if (lastHash === currentHash) {
-        // Same content this session already saw
-        const slicedTokens = isPartial ? estimateTokens(sliceLines(currentContent)) : estimateTokens(currentContent);
-        await this.addTokensSaved(slicedTokens);
+    const lastHash = lastRead[0].hash;
 
-        await db.prepare(
-          "UPDATE session_reads SET read_at = ? WHERE session_id = ? AND path = ?"
-        ).run(now, this.sessionId, absPath);
+    if (lastHash === currentHash) {
+      return this.handleUnchanged(db, state);
+    }
 
-        const label = isPartial
-          ? `[cachebro: unchanged, lines ${rangeStart}-${rangeEnd} of ${currentLines}, ${slicedTokens} tokens saved]`
-          : `[cachebro: unchanged, ${currentLines} lines, ${slicedTokens} tokens saved]`;
+    return this.handleChanged(db, state, lastHash);
+  }
 
-        return {
-          cached: true,
-          content: label,
-          hash: currentHash,
-          totalLines: currentLines,
-          linesChanged: 0,
-        };
+  private handleFirstRead(db: DatabaseSync, s: ReadState): FileReadResult {
+    this.storeVersion(db, s.absPath, s.currentHash, s.currentContent, s.currentLines, s.now);
+    db.prepare(
+      "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
+    ).run(this.sessionId, s.absPath, s.currentHash, s.now);
+
+    return { cached: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+  }
+
+  private handleUnchanged(db: DatabaseSync, s: ReadState): FileReadResult {
+    const slicedTokens = estimateTokens(this.sliceContent(s));
+    this.addTokensSaved(db, slicedTokens);
+
+    db.prepare(
+      "UPDATE session_reads SET read_at = ? WHERE session_id = ? AND path = ?"
+    ).run(s.now, this.sessionId, s.absPath);
+
+    const label = s.isPartial
+      ? `[cachebro: unchanged, lines ${s.rangeStart}-${s.rangeEnd} of ${s.currentLines}, ${slicedTokens} tokens saved]`
+      : `[cachebro: unchanged, ${s.currentLines} lines, ${slicedTokens} tokens saved]`;
+
+    return { cached: true, content: label, hash: s.currentHash, totalLines: s.currentLines, linesChanged: 0 };
+  }
+
+  private handleChanged(db: DatabaseSync, s: ReadState, lastHash: string): FileReadResult {
+    const oldVersion = db.prepare(
+      "SELECT content FROM file_versions WHERE path = ? AND hash = ?"
+    ).all(s.absPath, lastHash) as { content: string }[];
+
+    this.storeVersion(db, s.absPath, s.currentHash, s.currentContent, s.currentLines, s.now);
+    db.prepare(
+      "UPDATE session_reads SET hash = ?, read_at = ? WHERE session_id = ? AND path = ?"
+    ).run(s.currentHash, s.now, this.sessionId, s.absPath);
+
+    if (oldVersion.length > 0) {
+      const diffResult = computeDiff(oldVersion[0].content, s.currentContent, s.absPath);
+      if (diffResult.hasChanges) {
+        return s.isPartial
+          ? this.handlePartialDiff(db, s, diffResult)
+          : this.handleFullDiff(db, s, diffResult);
       }
+    }
 
-      // File changed — find old version to diff against
-      const oldVersion = await db.prepare(
-        "SELECT content FROM file_versions WHERE path = ? AND hash = ?"
-      ).all(absPath, lastHash);
+    return { cached: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+  }
 
-      // Store the new version
-      await db.prepare(
-        "INSERT OR IGNORE INTO file_versions (path, hash, content, lines, created_at) VALUES (?, ?, ?, ?, ?)"
-      ).run(absPath, currentHash, currentContent, currentLines, now);
-
-      // Update session read pointer
-      await db.prepare(
-        "UPDATE session_reads SET hash = ?, read_at = ? WHERE session_id = ? AND path = ?"
-      ).run(currentHash, now, this.sessionId, absPath);
-
-      if (oldVersion.length > 0) {
-        const oldContent = (oldVersion[0] as any).content as string;
-        const diffResult = computeDiff(oldContent, currentContent, filePath);
-
-        if (diffResult.hasChanges) {
-          // Check if the requested range overlaps with changed lines
-          if (isPartial) {
-            let rangeHasChanges = false;
-            for (let l = rangeStart; l <= rangeEnd; l++) {
-              if (diffResult.changedNewLines.has(l)) {
-                rangeHasChanges = true;
-                break;
-              }
-            }
-
-            if (!rangeHasChanges) {
-              // Changes exist but NOT in the requested range
-              const slicedTokens = estimateTokens(sliceLines(currentContent));
-              await this.addTokensSaved(slicedTokens);
-              return {
-                cached: true,
-                content: `[cachebro: unchanged in lines ${rangeStart}-${rangeEnd}, changes elsewhere in file, ${slicedTokens} tokens saved]`,
-                hash: currentHash,
-                totalLines: currentLines,
-                linesChanged: 0,
-              };
-            }
-          }
-
-          // Changes overlap with requested range (or full-file read) — return diff or slice
-          if (isPartial) {
-            // Return just the requested lines from the new content
-            const sliced = sliceLines(currentContent);
-            const fullTokens = estimateTokens(sliced);
-            // No savings — we're returning the content they asked for
-            return {
-              cached: false,
-              content: sliced,
-              hash: currentHash,
-              totalLines: currentLines,
-            };
-          }
-
-          const fullTokens = estimateTokens(currentContent);
-          const diffTokens = estimateTokens(diffResult.diff);
-          const saved = Math.max(0, fullTokens - diffTokens);
-          await this.addTokensSaved(saved);
-
-          return {
-            cached: true,
-            content: diffResult.diff,
-            diff: diffResult.diff,
-            hash: currentHash,
-            linesChanged: diffResult.linesChanged,
-            totalLines: currentLines,
-          };
-        }
-      }
-
-      // Old version not found or no changes detected — return content
-      const content = isPartial ? sliceLines(currentContent) : currentContent;
+  private handlePartialDiff(db: DatabaseSync, s: ReadState, diffResult: DiffResult): FileReadResult {
+    if (!this.rangeHasChanges(diffResult.changedNewLines, s.rangeStart, s.rangeEnd)) {
+      const slicedTokens = estimateTokens(this.sliceContent(s));
+      this.addTokensSaved(db, slicedTokens);
       return {
-        cached: false,
-        content,
-        hash: currentHash,
-        totalLines: currentLines,
+        cached: true,
+        content: `[cachebro: unchanged in lines ${s.rangeStart}-${s.rangeEnd}, changes elsewhere in file, ${slicedTokens} tokens saved]`,
+        hash: s.currentHash,
+        totalLines: s.currentLines,
+        linesChanged: 0,
       };
     }
 
-    // First read in this session
-    await db.prepare(
-      "INSERT OR IGNORE INTO file_versions (path, hash, content, lines, created_at) VALUES (?, ?, ?, ?, ?)"
-    ).run(absPath, currentHash, currentContent, currentLines, now);
+    return { cached: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+  }
 
-    await db.prepare(
-      "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
-    ).run(this.sessionId, absPath, currentHash, now);
+  private handleFullDiff(db: DatabaseSync, s: ReadState, diffResult: DiffResult): FileReadResult {
+    const saved = Math.max(0, estimateTokens(s.currentContent) - estimateTokens(diffResult.diff));
+    this.addTokensSaved(db, saved);
 
-    const content = isPartial ? sliceLines(currentContent) : currentContent;
     return {
-      cached: false,
-      content,
-      hash: currentHash,
-      totalLines: currentLines,
+      cached: true,
+      content: diffResult.diff,
+      diff: diffResult.diff,
+      hash: s.currentHash,
+      linesChanged: diffResult.linesChanged,
+      totalLines: s.currentLines,
     };
   }
 
+  private sliceContent(s: ReadState): string {
+    if (!s.isPartial) return s.currentContent;
+    const lines = s.currentContent.split("\n");
+    const start = s.offset > 0 ? s.offset - 1 : 0;
+    const end = s.limit > 0 ? start + s.limit : lines.length;
+    return lines.slice(start, end).join("\n");
+  }
+
+  private rangeHasChanges(changedLines: Set<number>, rangeStart: number, rangeEnd: number): boolean {
+    for (let l = rangeStart; l <= rangeEnd; l++) {
+      if (changedLines.has(l)) return true;
+    }
+    return false;
+  }
+
+  private storeVersion(db: DatabaseSync, absPath: string, hash: string, content: string, lines: number, now: number): void {
+    db.prepare(
+      "INSERT OR IGNORE INTO file_versions (path, hash, content, lines, created_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(absPath, hash, content, lines, now);
+  }
+
+  // Always returns full content and resets session tracking. Never records token savings.
   async readFileFull(filePath: string): Promise<FileReadResult> {
     await this.init();
     const db = this.getDb();
-    const { readFileSync, statSync } = await import("fs");
-    const { resolve } = await import("path");
 
     const absPath = resolve(filePath);
     statSync(absPath);
@@ -245,70 +239,61 @@ export class CacheStore {
     const currentLines = currentContent.split("\n").length;
     const now = Date.now();
 
-    await db.prepare(
-      "INSERT OR IGNORE INTO file_versions (path, hash, content, lines, created_at) VALUES (?, ?, ?, ?, ?)"
-    ).run(absPath, currentHash, currentContent, currentLines, now);
-
-    await db.prepare(
+    this.storeVersion(db, absPath, currentHash, currentContent, currentLines, now);
+    db.prepare(
       "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
     ).run(this.sessionId, absPath, currentHash, now);
 
-    return {
-      cached: false,
-      content: currentContent,
-      hash: currentHash,
-      totalLines: currentLines,
-    };
-  }
-
-  async onFileChanged(_filePath: string): Promise<void> {
-    // Hash check in readFile handles staleness detection.
+    return { cached: false, content: currentContent, hash: currentHash, totalLines: currentLines };
   }
 
   async onFileDeleted(filePath: string): Promise<void> {
     await this.init();
     const db = this.getDb();
-    const { resolve } = await import("path");
     const absPath = resolve(filePath);
-    await db.prepare("DELETE FROM file_versions WHERE path = ?").run(absPath);
-    await db.prepare("DELETE FROM session_reads WHERE path = ?").run(absPath);
+    db.prepare("DELETE FROM file_versions WHERE path = ?").run(absPath);
+    db.prepare("DELETE FROM session_reads WHERE path = ?").run(absPath);
   }
 
   async getStats(): Promise<CacheStats> {
     await this.init();
     const db = this.getDb();
 
-    const versions = await db.prepare("SELECT COUNT(DISTINCT path) as c FROM file_versions").all();
-    const tokens = await db.prepare("SELECT value FROM stats WHERE key = 'tokens_saved'").all();
-    const sessionTokens = await db.prepare(
+    const versions = db.prepare("SELECT COUNT(DISTINCT path) as c FROM file_versions").all() as { c: number }[];
+    const tokens = db.prepare("SELECT value FROM stats WHERE key = 'tokens_saved'").all() as { value: number }[];
+    const sessionTokens = db.prepare(
       "SELECT value FROM session_stats WHERE session_id = ? AND key = 'tokens_saved'"
-    ).all(this.sessionId);
-
-    const filesTracked = (versions[0] as any).c as number;
+    ).all(this.sessionId) as { value: number }[];
 
     return {
-      filesTracked,
-      tokensSaved: tokens.length > 0 ? (tokens[0] as any).value as number : 0,
-      sessionTokensSaved: sessionTokens.length > 0 ? (sessionTokens[0] as any).value as number : 0,
+      filesTracked: versions.length > 0 ? versions[0].c : 0,
+      tokensSaved: tokens.length > 0 ? tokens[0].value : 0,
+      sessionTokensSaved: sessionTokens.length > 0 ? sessionTokens[0].value : 0,
     };
   }
 
   async clear(): Promise<void> {
     await this.init();
     const db = this.getDb();
-    await db.exec("DELETE FROM file_versions; DELETE FROM session_reads; DELETE FROM session_stats; UPDATE stats SET value = 0;");
+    db.prepare("DELETE FROM file_versions").run();
+    db.prepare("DELETE FROM session_reads").run();
+    db.prepare("DELETE FROM session_stats").run();
+    db.prepare("UPDATE stats SET value = 0").run();
   }
 
   async close(): Promise<void> {
-    // @tursodatabase/database doesn't expose close — connection is managed internally
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+      this.initialized = false;
+    }
   }
 
-  private async addTokensSaved(tokens: number): Promise<void> {
-    const db = this.getDb();
-    await db.prepare(
+  private addTokensSaved(db: DatabaseSync, tokens: number): void {
+    db.prepare(
       "UPDATE stats SET value = value + ? WHERE key = 'tokens_saved'"
     ).run(tokens);
-    await db.prepare(
+    db.prepare(
       "INSERT INTO session_stats (session_id, key, value) VALUES (?, 'tokens_saved', ?) ON CONFLICT(session_id, key) DO UPDATE SET value = value + ?"
     ).run(this.sessionId, tokens, tokens);
   }

@@ -1,0 +1,33 @@
+# ── Universal noise ──────────────────────────────────────────────────────────
+# graphify already skips: node_modules, __pycache__, .git, build, target,
+# dist, out, venv, lock files. These extend that baseline.
+
+# Tool output folders (machine-specific, no semantic value)
+graphify-out/
+.cachebro/
+temporary/
+
+# IDE and OS noise
+.idea/
+.DS_Store
+*.iml
+
+# ── Node.js / TypeScript ─────────────────────────────────────────────────────
+# Framework build output
+.next/
+.nuxt/
+.svelte-kit/
+
+# Test coverage reports and snapshots
+coverage/
+.nyc_output/
+**/__snapshots__/
+**/*.snap
+
+# Type declaration caches
+*.tsbuildinfo
+
+# Test fixtures (data files, not logic)
+**/fixtures/
+**/test-data/
+**/mocks/data/

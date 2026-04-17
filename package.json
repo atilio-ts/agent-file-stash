@@ -13,22 +13,32 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "bun build packages/cli/src/index.ts --target node --external @tursodatabase/database --external @modelcontextprotocol/sdk --external zod --outfile dist/cli.mjs && node -e \"let f=require('fs');let c=f.readFileSync('dist/cli.mjs','utf8');f.writeFileSync('dist/cli.mjs',c.replace('#!/usr/bin/env bun','#!/usr/bin/env node'))\"",
-    "prepublishOnly": "bun run build",
-    "test": "bun test"
+    "build": "tsup",
+    "prepublishOnly": "pnpm run build",
+    "test": "vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@tursodatabase/database": "^0.4.4",
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "bun-types": "latest",
-    "typescript": "^5.0.0"
+    "@types/node": "^24.0.0",
+    "cachebro-sdk": "workspace:*",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
   },
   "workspaces": [
     "packages/*"
   ],
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
   "keywords": [
     "mcp",
     "ai",
@@ -38,7 +48,7 @@
     "coding-agent",
     "claude",
     "cursor",
-    "turso"
+    "sqlite"
   ],
   "license": "MIT",
   "repository": {
