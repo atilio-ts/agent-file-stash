@@ -1,12 +1,12 @@
 {
-  "name": "cachebro",
+  "name": "filestash",
   "version": "0.2.0",
   "type": "module",
   "bin": {
-    "cachebro": "src/index.ts"
+    "filestash": "src/index.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "cachebro-sdk": "workspace:*"
+    "filestash-sdk": "workspace:*"
   }
 }

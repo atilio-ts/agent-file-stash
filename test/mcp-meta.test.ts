@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import { createCache } from "cachebro-sdk";
-import type { CacheStore, FileWatcher } from "cachebro-sdk";
+import { createCache } from "filestash-sdk";
+import type { CacheStore, FileWatcher } from "filestash-sdk";
 import { writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -23,7 +23,7 @@ describe("MCP _meta field", () => {
     await cache.init();
 
     const packageJson = JSON.parse(readFileSync(join(import.meta.dirname, "../package.json"), "utf-8"));
-    expectedNamespace = (packageJson.mcpName || "io.github.glommer/cachebro").replace(/\//g, ".");
+    expectedNamespace = (packageJson.mcpName || "io.github.glommer/filestash").replace(/\//g, ".");
   });
 
   afterAll(async () => {
@@ -33,7 +33,7 @@ describe("MCP _meta field", () => {
   });
 
   test("namespace reads from package.json mcpName", () => {
-    expect(expectedNamespace).toBe("io.github.glommer.cachebro");
+    expect(expectedNamespace).toBe("io.github.glommer.filestash");
   });
 
   test("_meta key format follows reverse DNS convention", () => {

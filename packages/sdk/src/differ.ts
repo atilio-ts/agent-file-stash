@@ -117,9 +117,10 @@ function fillContextGap(current: DiffLine[], rawLines: DiffLine[], lastChangeIdx
   const contextEnd = lastChangeIdx + CONTEXT + 1;
   const inCurrent = new Set(current);
   for (let c = contextEnd; c < upTo; c++) {
-    if (!inCurrent.has(rawLines[c])) {
-      current.push(rawLines[c]);
-      inCurrent.add(rawLines[c]);
+    const line = rawLines[c];
+    if (line !== undefined && !inCurrent.has(line)) {
+      current.push(line);
+      inCurrent.add(line);
     }
   }
 }

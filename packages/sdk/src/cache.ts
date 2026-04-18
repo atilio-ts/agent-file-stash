@@ -61,6 +61,11 @@ function contentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, HASH_LENGTH);
 }
 
+function queryOne<T>(db: DatabaseSync, sql: string, params: (string | number)[] = []): T | undefined {
+  const rows = db.prepare(sql).all(...params) as T[];
+  return rows[0];
+}
+
 export class CacheStore {
   private db: DatabaseSync | null = null;
   private readonly dbPath: string;
@@ -85,16 +90,30 @@ export class CacheStore {
     return this.db;
   }
 
+  private readFileSnapshot(filePath: string): {
+    absPath: string;
+    content: string;
+    hash: string;
+    lines: number;
+    now: number;
+  } {
+    const absPath = resolve(filePath);
+    statSync(absPath); // throws if file doesn't exist
+    const content = readFileSync(absPath, "utf-8");
+    return {
+      absPath,
+      content,
+      hash: contentHash(content),
+      lines: content.split("\n").length,
+      now: Date.now(),
+    };
+  }
+
   async readFile(filePath: string, options?: { offset?: number; limit?: number }): Promise<FileReadResult> {
     await this.init();
     const db = this.getDb();
 
-    const absPath = resolve(filePath);
-    statSync(absPath); // throws if file doesn't exist
-
-    const currentContent = readFileSync(absPath, "utf-8");
-    const currentHash = contentHash(currentContent);
-    const currentLines = currentContent.split("\n").length;
+    const { absPath, content: currentContent, hash: currentHash, lines: currentLines, now } = this.readFileSnapshot(filePath);
     const offset = options?.offset ?? 0;
     const limit = options?.limit ?? 0;
     const rangeStart = offset > 0 ? offset : 1;
@@ -109,18 +128,19 @@ export class CacheStore {
       rangeEnd: limit > 0 ? rangeStart + limit - 1 : currentLines,
       offset,
       limit,
-      now: Date.now(),
+      now,
     };
 
-    const lastRead = db.prepare(
-      "SELECT hash FROM session_reads WHERE session_id = ? AND path = ?"
-    ).all(this.sessionId, absPath) as { hash: string }[];
+    const lastRead = queryOne<{ hash: string }>(db,
+      "SELECT hash FROM session_reads WHERE session_id = ? AND path = ?",
+      [this.sessionId, absPath],
+    );
 
-    if (lastRead.length === 0) {
+    if (!lastRead) {
       return this.handleFirstRead(db, state);
     }
 
-    const lastHash = lastRead[0].hash;
+    const lastHash = lastRead.hash;
 
     if (lastHash === currentHash) {
       return this.handleUnchanged(db, state);
@@ -147,24 +167,25 @@ export class CacheStore {
     ).run(s.now, this.sessionId, s.absPath);
 
     const label = s.isPartial
-      ? `[cachebro: unchanged, lines ${s.rangeStart}-${s.rangeEnd} of ${s.currentLines}, ${slicedTokens} tokens saved]`
-      : `[cachebro: unchanged, ${s.currentLines} lines, ${slicedTokens} tokens saved]`;
+      ? `[filestash: unchanged, lines ${s.rangeStart}-${s.rangeEnd} of ${s.currentLines}, ${slicedTokens} tokens saved]`
+      : `[filestash: unchanged, ${s.currentLines} lines, ${slicedTokens} tokens saved]`;
 
     return { cached: true, content: label, hash: s.currentHash, totalLines: s.currentLines, linesChanged: 0 };
   }
 
   private handleChanged(db: DatabaseSync, s: ReadState, lastHash: string): FileReadResult {
-    const oldVersion = db.prepare(
-      "SELECT content FROM file_versions WHERE path = ? AND hash = ?"
-    ).all(s.absPath, lastHash) as { content: string }[];
+    const oldVersion = queryOne<{ content: string }>(db,
+      "SELECT content FROM file_versions WHERE path = ? AND hash = ?",
+      [s.absPath, lastHash],
+    );
 
     this.storeVersion(db, s.absPath, s.currentHash, s.currentContent, s.currentLines, s.now);
     db.prepare(
       "UPDATE session_reads SET hash = ?, read_at = ? WHERE session_id = ? AND path = ?"
     ).run(s.currentHash, s.now, this.sessionId, s.absPath);
 
-    if (oldVersion.length > 0) {
-      const diffResult = computeDiff(oldVersion[0].content, s.currentContent, s.absPath);
+    if (oldVersion) {
+      const diffResult = computeDiff(oldVersion.content, s.currentContent, s.absPath);
       if (diffResult.hasChanges) {
         return s.isPartial
           ? this.handlePartialDiff(db, s, diffResult)
@@ -181,7 +202,7 @@ export class CacheStore {
       this.addTokensSaved(db, slicedTokens);
       return {
         cached: true,
-        content: `[cachebro: unchanged in lines ${s.rangeStart}-${s.rangeEnd}, changes elsewhere in file, ${slicedTokens} tokens saved]`,
+        content: `[filestash: unchanged in lines ${s.rangeStart}-${s.rangeEnd}, changes elsewhere in file, ${slicedTokens} tokens saved]`,
         hash: s.currentHash,
         totalLines: s.currentLines,
         linesChanged: 0,
@@ -231,20 +252,14 @@ export class CacheStore {
     await this.init();
     const db = this.getDb();
 
-    const absPath = resolve(filePath);
-    statSync(absPath);
+    const { absPath, content, hash, lines, now } = this.readFileSnapshot(filePath);
 
-    const currentContent = readFileSync(absPath, "utf-8");
-    const currentHash = contentHash(currentContent);
-    const currentLines = currentContent.split("\n").length;
-    const now = Date.now();
-
-    this.storeVersion(db, absPath, currentHash, currentContent, currentLines, now);
+    this.storeVersion(db, absPath, hash, content, lines, now);
     db.prepare(
       "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
-    ).run(this.sessionId, absPath, currentHash, now);
+    ).run(this.sessionId, absPath, hash, now);
 
-    return { cached: false, content: currentContent, hash: currentHash, totalLines: currentLines };
+    return { cached: false, content, hash, totalLines: lines };
   }
 
   async onFileDeleted(filePath: string): Promise<void> {
@@ -259,16 +274,17 @@ export class CacheStore {
     await this.init();
     const db = this.getDb();
 
-    const versions = db.prepare("SELECT COUNT(DISTINCT path) as c FROM file_versions").all() as { c: number }[];
-    const tokens = db.prepare("SELECT value FROM stats WHERE key = 'tokens_saved'").all() as { value: number }[];
-    const sessionTokens = db.prepare(
-      "SELECT value FROM session_stats WHERE session_id = ? AND key = 'tokens_saved'"
-    ).all(this.sessionId) as { value: number }[];
+    const versionRow = queryOne<{ c: number }>(db, "SELECT COUNT(DISTINCT path) as c FROM file_versions");
+    const tokenRow = queryOne<{ value: number }>(db, "SELECT value FROM stats WHERE key = 'tokens_saved'");
+    const sessionTokenRow = queryOne<{ value: number }>(db,
+      "SELECT value FROM session_stats WHERE session_id = ? AND key = 'tokens_saved'",
+      [this.sessionId],
+    );
 
     return {
-      filesTracked: versions.length > 0 ? versions[0].c : 0,
-      tokensSaved: tokens.length > 0 ? tokens[0].value : 0,
-      sessionTokensSaved: sessionTokens.length > 0 ? sessionTokens[0].value : 0,
+      filesTracked: versionRow?.c ?? 0,
+      tokensSaved: tokenRow?.value ?? 0,
+      sessionTokensSaved: sessionTokenRow?.value ?? 0,
     };
   }
 

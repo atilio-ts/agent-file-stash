@@ -1,16 +1,16 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.glommer/cachebro",
+  "name": "io.github.glommer/filestash",
   "description": "File cache with diff tracking for AI coding agents. Drop-in replacement for file reads that saves ~26% tokens.",
   "repository": {
-    "url": "https://github.com/glommer/cachebro",
+    "url": "https://github.com/glommer/filestash",
     "source": "github"
   },
   "version": "0.2.1",
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "cachebro",
+      "identifier": "filestash",
       "version": "0.2.1",
       "transport": {
         "type": "stdio"

@@ -31,7 +31,11 @@ export class FileWatcher {
           filePath,
           setTimeout(() => {
             this.debounceTimers.delete(filePath);
-            this.handleChange(filePath);
+            this.handleChange(filePath).catch((e: unknown) => {
+              process.stderr.write(
+                `[filestash] unhandled watcher error: ${e instanceof Error ? e.message : String(e)}\n`,
+              );
+            });
           }, this.debounceMs),
         );
       });
@@ -53,7 +57,7 @@ export class FileWatcher {
         await this.cache.onFileDeleted(filePath);
       }
     } catch (e: unknown) {
-      process.stderr.write(`[cachebro] watcher error on ${filePath}: ${e instanceof Error ? e.message : String(e)}\n`);
+      process.stderr.write(`[filestash] watcher error on ${filePath}: ${e instanceof Error ? e.message : String(e)}\n`);
     }
   }
 }

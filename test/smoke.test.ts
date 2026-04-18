@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import { createCache } from "cachebro-sdk";
-import type { CacheStore, FileWatcher } from "cachebro-sdk";
+import { createCache } from "filestash-sdk";
+import type { CacheStore, FileWatcher } from "filestash-sdk";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
@@ -41,13 +41,15 @@ describe("smoke tests", () => {
   test("second read, no changes — cached", async () => {
     const r = await cache.readFile(FILE_PATH);
     expect(r.cached).toBe(true);
+    if (!r.cached) throw new Error("expected cached result");
     expect(r.linesChanged).toBe(0);
   });
 
   test("modified file returns diff", async () => {
-    writeFileSync(FILE_PATH, `function hello() {\n  console.log("hello cachebro!");\n  return true;\n}\n`);
+    writeFileSync(FILE_PATH, `function hello() {\n  console.log("hello filestash!");\n  return true;\n}\n`);
     const r = await cache.readFile(FILE_PATH);
     expect(r.cached).toBe(true);
+    if (!r.cached) throw new Error("expected cached result");
     expect(r.linesChanged).toBeGreaterThan(0);
     expect(r.diff).toBeTruthy();
   });
@@ -69,6 +71,7 @@ describe("smoke tests", () => {
   test("same session second read is cached", async () => {
     const r = await cache2.readFile(FILE_PATH);
     expect(r.cached).toBe(true);
+    if (!r.cached) throw new Error("expected cached result");
     expect(r.linesChanged).toBe(0);
   });
 
@@ -85,6 +88,7 @@ describe("smoke tests", () => {
   test("partial read, file unchanged — cached", async () => {
     const r = await cache.readFile(LONG_FILE, { offset: 5, limit: 3 });
     expect(r.cached).toBe(true);
+    if (!r.cached) throw new Error("expected cached result");
     expect(r.linesChanged).toBe(0);
     expect(r.content).toContain("unchanged");
   });
@@ -97,6 +101,7 @@ describe("smoke tests", () => {
     writeFileSync(LONG_FILE, lines.join("\n"));
     const r = await cache.readFile(LONG_FILE, { offset: 5, limit: 3 });
     expect(r.cached).toBe(true);
+    if (!r.cached) throw new Error("expected cached result");
     expect(r.linesChanged).toBe(0);
     expect(r.content).toContain("unchanged");
   });

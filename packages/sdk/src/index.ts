@@ -8,7 +8,7 @@ import { FileWatcher } from "./watcher.js";
 import type { CacheConfig } from "./types.js";
 
 /**
- * Create a cachebro instance with file watching enabled.
+ * Create a filestash instance with file watching enabled.
  */
 export function createCache(config: CacheConfig): { cache: CacheStore; watcher: FileWatcher } {
   const cache = new CacheStore(config);

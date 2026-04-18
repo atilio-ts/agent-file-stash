@@ -7,20 +7,30 @@ export interface CacheConfig {
   watchPaths?: string[];
 }
 
-export interface FileReadResult {
-  /** Whether this was served from cache */
-  cached: boolean;
-  /** The file content (full on first read, diff on subsequent) */
-  content: string;
-  /** If cached and changed, the unified diff */
-  diff?: string;
-  /** Lines changed since last read */
-  linesChanged?: number;
+interface FileReadResultBase {
   /** Total lines in the file */
   totalLines?: number;
   /** Content hash */
   hash: string;
 }
+
+interface FileReadResultFresh extends FileReadResultBase {
+  cached: false;
+  /** Full file content */
+  content: string;
+}
+
+interface FileReadResultCached extends FileReadResultBase {
+  cached: true;
+  /** Short confirmation label or diff content */
+  content: string;
+  /** Lines changed since last read */
+  linesChanged: number;
+  /** Unified diff, present when file changed */
+  diff?: string;
+}
+
+export type FileReadResult = FileReadResultFresh | FileReadResultCached;
 
 export interface CacheStats {
   /** Total files cached */

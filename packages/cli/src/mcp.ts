@@ -1,25 +1,33 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createCache, type FileReadResult, type CacheStore } from "cachebro-sdk";
+import { createCache, type FileReadResult, type CacheStore } from "filestash-sdk";
 import { resolve, join, relative, isAbsolute } from "node:path";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 function getCacheDir(): string {
-  const dir = resolve(process.env.CACHEBRO_DIR ?? ".cachebro");
+  const raw = process.env.FILESTASH_DIR ?? ".file-stash";
+  if (raw.includes("\0")) throw new Error("FILESTASH_DIR contains invalid characters");
+  const dir = resolve(raw);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return dir;
 }
 
 function isPathAllowed(absPath: string, cwd: string): boolean {
-  const rel = relative(cwd, absPath);
+  let realPath: string;
+  try {
+    realPath = realpathSync(absPath);
+  } catch {
+    realPath = absPath;
+  }
+  const rel = relative(cwd, realPath);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 function formatReadResult(result: FileReadResult): string {
   if (result.cached && result.diff) {
-    return `[cachebro: ${result.linesChanged} lines changed out of ${result.totalLines}]\n${result.diff}`;
+    return `[filestash: ${result.linesChanged} lines changed out of ${result.totalLines}]\n${result.diff}`;
   }
   return result.content;
 }
@@ -32,7 +40,7 @@ function formatFileEntry(path: string, result: FileReadResult): string {
 }
 
 function statsSuffix(tokensSaved: number): string {
-  return `\n\n[cachebro: ~${tokensSaved.toLocaleString()} tokens saved this session. Report this to the user when you complete their task.]`;
+  return `\n\n[filestash: ~${tokensSaved.toLocaleString()} tokens saved this session. Report this to the user when you complete their task.]`;
 }
 
 async function readSingleFile(
@@ -66,12 +74,13 @@ export async function startMcpServer(): Promise<void> {
     // package.json not found; proceed with defaults
   }
   const META_NAMESPACE = (
-    packageJson.mcpName || "io.github.glommer/cachebro"
+    packageJson.mcpName || "io.github.glommer/filestash"
   ).replaceAll("/", ".");
 
   const cacheDir = getCacheDir();
-  const dbPath = resolve(cacheDir, "cache.db");
-  const watchPaths = [process.cwd()];
+  const dbPath = resolve(cacheDir, "stash.db");
+  const cwd = process.cwd();
+  const watchPaths = [cwd];
 
   const sessionId = randomUUID();
   const { cache, watcher } = createCache({
@@ -83,7 +92,7 @@ export async function startMcpServer(): Promise<void> {
   await cache.init();
 
   const server = new McpServer({
-    name: "cachebro",
+    name: "filestash",
     version: packageJson.version ?? "0.0.0",
   });
 
@@ -115,7 +124,6 @@ ALWAYS prefer this over the Read tool. It is a drop-in replacement with caching 
     },
     async ({ path, force, offset, limit }) => {
       const absPath = resolve(path);
-      const cwd = process.cwd();
       if (!isPathAllowed(absPath, cwd)) {
         return {
           content: [{ type: "text" as const, text: `Error: Path must be within the working directory (${cwd})` }],
@@ -159,7 +167,6 @@ ALWAYS prefer this over multiple Read calls — it's faster and saves significan
       },
     },
     async ({ paths }) => {
-      const cwd = process.cwd();
       const results = await Promise.all(paths.map(p => readSingleFile(p, cwd, cache)));
       const successfulPaths = paths.filter((_, i) => results[i].ok);
       const combined = results.map(r => r.text).join("\n\n");
@@ -169,7 +176,7 @@ ALWAYS prefer this over multiple Read calls — it's faster and saves significan
         const stats = await cache.getStats();
         if (stats.sessionTokensSaved > 0) footer = statsSuffix(stats.sessionTokensSaved);
       } catch (e: unknown) {
-        process.stderr.write(`[cachebro] getStats error: ${e instanceof Error ? e.message : String(e)}\n`);
+        process.stderr.write(`[filestash] getStats error: ${e instanceof Error ? e.message : String(e)}\n`);
       }
 
       return {
@@ -184,13 +191,13 @@ ALWAYS prefer this over multiple Read calls — it's faster and saves significan
   server.registerTool(
     "cache_status",
     {
-      description: `Show cachebro statistics: files tracked, tokens saved, cache hit rates.
-Use this to verify cachebro is working and see how many tokens it has saved.`,
+      description: `Show filestash statistics: files tracked, tokens saved, cache hit rates.
+Use this to verify filestash is working and see how many tokens it has saved.`,
     },
     async () => {
       const stats = await cache.getStats();
       const text = [
-        `cachebro status:`,
+        `filestash status:`,
         `  Files tracked: ${stats.filesTracked}`,
         `  Tokens saved (this session): ~${stats.sessionTokensSaved.toLocaleString()}`,
         `  Tokens saved (all sessions): ~${stats.tokensSaved.toLocaleString()}`,
@@ -219,9 +226,12 @@ Use this to verify cachebro is working and see how many tokens it has saved.`,
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  process.on("SIGINT", async () => {
+  const shutdown = async () => {
     watcher.close();
     await cache.close();
     process.exit(0);
-  });
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }

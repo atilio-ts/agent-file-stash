@@ -1,4 +1,4 @@
-import { createCache } from "cachebro-sdk";
+import { createCache } from "filestash-sdk";
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -7,11 +7,11 @@ import { startMcpServer } from "./mcp.js";
 const CLI_STATUS_SESSION = "cli-status";
 
 async function runStatus(): Promise<void> {
-  const cacheDir = resolve(process.env.CACHEBRO_DIR ?? ".cachebro");
-  const dbPath = join(cacheDir, "cache.db");
+  const cacheDir = resolve(process.env.FILESTASH_DIR ?? ".file-stash");
+  const dbPath = join(cacheDir, "stash.db");
 
   if (!existsSync(dbPath)) {
-    console.log("No cachebro database found. Run 'cachebro serve' to start caching.");
+    console.log("No filestash database found. Run 'filestash serve' to start caching.");
     process.exit(0);
   }
 
@@ -19,7 +19,7 @@ async function runStatus(): Promise<void> {
   await cache.init();
   const stats = await cache.getStats();
 
-  console.log(`cachebro status:`);
+  console.log(`filestash status:`);
   console.log(`  Files tracked:          ${stats.filesTracked}`);
   console.log(`  Tokens saved (total):   ~${stats.tokensSaved.toLocaleString()}`);
 
@@ -31,12 +31,12 @@ async function runInit(): Promise<void> {
 
   const mcpServersEntry = {
     command: "npx",
-    args: ["cachebro", "serve"],
+    args: ["filestash", "serve"],
   };
 
   const opencodeMcpEntry = {
     type: "local" as const,
-    command: ["npx", "cachebro", "serve"],
+    command: ["npx", "filestash", "serve"],
   };
 
   const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, ".config");
@@ -78,37 +78,37 @@ async function runInit(): Promise<void> {
     }
 
     const section = config[target.key] as Record<string, unknown> | undefined;
-    if (section?.cachebro) {
+    if (section?.filestash) {
       console.log(`  ${target.name}: already configured`);
       configured++;
       continue;
     }
 
-    config[target.key] = { ...section, cachebro: target.entry };
+    config[target.key] = { ...section, filestash: target.entry };
     writeFileSync(target.path, JSON.stringify(config, null, 2) + "\n");
     console.log(`  ${target.name}: configured (${target.path})`);
     configured++;
   }
 
   if (configured === 0) {
-    console.log("No supported tools detected. You can manually add cachebro to your MCP config:");
-    console.log(JSON.stringify({ mcpServers: { cachebro: mcpServersEntry } }, null, 2));
+    console.log("No supported tools detected. You can manually add filestash to your MCP config:");
+    console.log(JSON.stringify({ mcpServers: { filestash: mcpServersEntry } }, null, 2));
   } else {
-    console.log(`\nDone! Restart your editor to pick up cachebro.`);
+    console.log(`\nDone! Restart your editor to pick up filestash.`);
   }
 }
 
 function runHelp(): void {
-  console.log(`cachebro - Agent file cache with diff tracking
+  console.log(`filestash - Agent file cache with diff tracking
 
 Usage:
-  cachebro init      Auto-configure cachebro for your editor
-  cachebro serve     Start the MCP server (default)
-  cachebro status    Show cache statistics
-  cachebro help      Show this help message
+  filestash init      Auto-configure filestash for your editor
+  filestash serve     Start the MCP server (default)
+  filestash status    Show cache statistics
+  filestash help      Show this help message
 
 Environment:
-  CACHEBRO_DIR       Cache directory (default: .cachebro)`);
+  FILESTASH_DIR       Cache directory (default: .file-stash)`);
 }
 
 const command = process.argv[2];
@@ -122,6 +122,6 @@ if (!command || command === "serve") {
 } else if (command === "help" || command === "--help") {
   runHelp();
 } else {
-  console.error(`Unknown command: ${command}. Run 'cachebro help' for usage.`);
+  console.error(`Unknown command: ${command}. Run 'filestash help' for usage.`);
   process.exit(1);
 }
