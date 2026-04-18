@@ -1,12 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createCache, type FileReadResult, type CacheStore } from "filestash-sdk";
+import { createStash, type FileReadResult, type StashStore } from "filestash-sdk";
 import { resolve, join, relative, isAbsolute } from "node:path";
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
-function getCacheDir(): string {
+function getStashDir(): string {
   const raw = process.env.FILESTASH_DIR ?? ".file-stash";
   if (raw.includes("\0")) throw new Error("FILESTASH_DIR contains invalid characters");
   const dir = resolve(raw);
@@ -26,14 +26,14 @@ export function isPathAllowed(absPath: string, cwd: string): boolean {
 }
 
 export function formatReadResult(result: FileReadResult): string {
-  if (result.cached && result.diff) {
+  if (result.stashed && result.diff) {
     return `[filestash: ${result.linesChanged} lines changed out of ${result.totalLines}]\n${result.diff}`;
   }
   return result.content;
 }
 
 function formatFileEntry(path: string, result: FileReadResult): string {
-  if (result.cached && result.diff) {
+  if (result.stashed && result.diff) {
     return `=== ${path} [${result.linesChanged} lines changed out of ${result.totalLines}] ===\n${result.diff}`;
   }
   return `=== ${path} ===\n${result.content}`;
@@ -46,7 +46,7 @@ function statsSuffix(tokensSaved: number): string {
 async function readSingleFile(
   path: string,
   cwd: string,
-  cache: CacheStore,
+  stash: StashStore,
 ): Promise<{ text: string; ok: boolean }> {
   const absPath = resolve(path);
   if (!isPathAllowed(absPath, cwd)) {
@@ -56,7 +56,7 @@ async function readSingleFile(
     };
   }
   try {
-    const result = await cache.readFile(path);
+    const result = await stash.readFile(path);
     return { text: formatFileEntry(path, result), ok: true };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
@@ -77,19 +77,19 @@ export async function startMcpServer(): Promise<void> {
     packageJson.mcpName || "io.github.glommer/filestash"
   ).replaceAll("/", ".");
 
-  const cacheDir = getCacheDir();
-  const dbPath = resolve(cacheDir, "stash.db");
+  const stashDir = getStashDir();
+  const dbPath = resolve(stashDir, "stash.db");
   const cwd = process.cwd();
   const watchPaths = [cwd];
 
   const sessionId = randomUUID();
-  const { cache, watcher } = createCache({
+  const { stash, watcher } = createStash({
     dbPath,
     sessionId,
     watchPaths,
   });
 
-  await cache.init();
+  await stash.init();
 
   const server = new McpServer({
     name: "filestash",
@@ -99,13 +99,13 @@ export async function startMcpServer(): Promise<void> {
   server.registerTool(
     "read_file",
     {
-      description: `Read a file with caching. Use this tool INSTEAD of the built-in Read tool for reading files.
-On first read, returns full content and caches it — identical to Read.
+      description: `Read a file with stashing. Use this tool INSTEAD of the built-in Read tool for reading files.
+On first read, returns full content and stashes it — identical to Read.
 On subsequent reads, if the file hasn't changed, returns a short confirmation instead of the full content — saving significant tokens.
 If the file changed, returns only the diff (changed lines) instead of the full file.
-Supports offset and limit for partial reads — and partial reads are also cached. If only lines outside the requested range changed, returns a short confirmation saving tokens.
-Set force=true to bypass the cache and get the full file content (use when you no longer have the original in context).
-ALWAYS prefer this over the Read tool. It is a drop-in replacement with caching benefits.`,
+Supports offset and limit for partial reads — and partial reads are also stashed. If only lines outside the requested range changed, returns a short confirmation saving tokens.
+Set force=true to bypass the stash and get the full file content (use when you no longer have the original in context).
+ALWAYS prefer this over the Read tool. It is a drop-in replacement with stashing benefits.`,
       inputSchema: {
         path: z.string().describe("Path to the file to read"),
         offset: z
@@ -119,7 +119,7 @@ ALWAYS prefer this over the Read tool. It is a drop-in replacement with caching 
         force: z
           .boolean()
           .optional()
-          .describe("Bypass cache and return full content"),
+          .describe("Bypass stash and return full content"),
       },
     },
     async ({ path, force, offset, limit }) => {
@@ -132,14 +132,14 @@ ALWAYS prefer this over the Read tool. It is a drop-in replacement with caching 
       }
       try {
         const result = force
-          ? await cache.readFileFull(path)
-          : await cache.readFile(path, {
+          ? await stash.readFileFull(path)
+          : await stash.readFile(path, {
               ...(offset !== undefined && { offset }),
               ...(limit !== undefined && { limit }),
             });
         let text = formatReadResult(result);
-        if (result.cached) {
-          const stats = await cache.getStats();
+        if (result.stashed) {
+          const stats = await stash.getStats();
           text += statsSuffix(stats.sessionTokensSaved);
         }
         return {
@@ -159,8 +159,8 @@ ALWAYS prefer this over the Read tool. It is a drop-in replacement with caching 
   server.registerTool(
     "read_files",
     {
-      description: `Read multiple files at once with caching. Use this tool INSTEAD of the built-in Read tool when you need to read several files.
-Same behavior as read_file but batched. Returns cached/diff results for each file.
+      description: `Read multiple files at once with stashing. Use this tool INSTEAD of the built-in Read tool when you need to read several files.
+Same behavior as read_file but batched. Returns stashed/diff results for each file.
 ALWAYS prefer this over multiple Read calls — it's faster and saves significant tokens.`,
       inputSchema: {
         paths: z.preprocess(
@@ -170,13 +170,13 @@ ALWAYS prefer this over multiple Read calls — it's faster and saves significan
       },
     },
     async ({ paths }) => {
-      const results = await Promise.all(paths.map(p => readSingleFile(p, cwd, cache)));
+      const results = await Promise.all(paths.map(p => readSingleFile(p, cwd, stash)));
       const successfulPaths = paths.filter((_, i) => results[i]!.ok);
       const combined = results.map(r => r.text).join("\n\n");
 
       let footer = "";
       try {
-        const stats = await cache.getStats();
+        const stats = await stash.getStats();
         if (stats.sessionTokensSaved > 0) footer = statsSuffix(stats.sessionTokensSaved);
       } catch (e: unknown) {
         process.stderr.write(`[filestash] getStats error: ${e instanceof Error ? e.message : String(e)}\n`);
@@ -192,13 +192,13 @@ ALWAYS prefer this over multiple Read calls — it's faster and saves significan
   );
 
   server.registerTool(
-    "cache_status",
+    "stash_status",
     {
-      description: `Show filestash statistics: files tracked, tokens saved, cache hit rates.
+      description: `Show filestash statistics: files tracked, tokens saved, stash hit rates.
 Use this to verify filestash is working and see how many tokens it has saved.`,
     },
     async () => {
-      const stats = await cache.getStats();
+      const stats = await stash.getStats();
       const text = [
         `filestash status:`,
         `  Files tracked: ${stats.filesTracked}`,
@@ -213,14 +213,14 @@ Use this to verify filestash is working and see how many tokens it has saved.`,
   );
 
   server.registerTool(
-    "cache_clear",
+    "stash_clear",
     {
-      description: `Clear all cached data. Use this to reset the cache completely.`,
+      description: `Clear all stashed data. Use this to reset the stash completely.`,
     },
     async () => {
-      await cache.clear();
+      await stash.clear();
       return {
-        content: [{ type: "text" as const, text: "Cache cleared." }],
+        content: [{ type: "text" as const, text: "Stash cleared." }],
         _meta: { [`${META_NAMESPACE}/cleared`]: true },
       };
     },
@@ -231,7 +231,7 @@ Use this to verify filestash is working and see how many tokens it has saved.`,
 
   const shutdown = async () => {
     watcher.close();
-    await cache.close();
+    await stash.close();
     process.exit(0);
   };
 

@@ -1,4 +1,4 @@
-import { createCache } from "filestash-sdk";
+import { createStash } from "filestash-sdk";
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -7,23 +7,23 @@ import { startMcpServer } from "./mcp.js";
 const CLI_STATUS_SESSION = "cli-status";
 
 async function runStatus(): Promise<void> {
-  const cacheDir = resolve(process.env.FILESTASH_DIR ?? ".file-stash");
-  const dbPath = join(cacheDir, "stash.db");
+  const stashDir = resolve(process.env.FILESTASH_DIR ?? ".file-stash");
+  const dbPath = join(stashDir, "stash.db");
 
   if (!existsSync(dbPath)) {
-    console.log("No filestash database found. Run 'filestash serve' to start caching.");
+    console.log("No filestash database found. Run 'filestash serve' to start stashing.");
     process.exit(0);
   }
 
-  const { cache } = createCache({ dbPath, sessionId: CLI_STATUS_SESSION });
-  await cache.init();
-  const stats = await cache.getStats();
+  const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION });
+  await stash.init();
+  const stats = await stash.getStats();
 
   console.log(`filestash status:`);
   console.log(`  Files tracked:          ${stats.filesTracked}`);
   console.log(`  Tokens saved (total):   ~${stats.tokensSaved.toLocaleString()}`);
 
-  await cache.close();
+  await stash.close();
 }
 
 async function runInit(): Promise<void> {
@@ -99,16 +99,16 @@ async function runInit(): Promise<void> {
 }
 
 function runHelp(): void {
-  console.log(`filestash - Agent file cache with diff tracking
+  console.log(`filestash - Agent file stash with diff tracking
 
 Usage:
   filestash init      Auto-configure filestash for your editor
   filestash serve     Start the MCP server (default)
-  filestash status    Show cache statistics
+  filestash status    Show stash statistics
   filestash help      Show this help message
 
 Environment:
-  FILESTASH_DIR       Cache directory (default: .file-stash)`);
+  FILESTASH_DIR       Stash directory (default: .file-stash)`);
 }
 
 const command = process.argv[2];

@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import { createCache } from "filestash-sdk";
-import type { CacheStore, FileWatcher } from "filestash-sdk";
+import { createStash } from "filestash-sdk";
+import type { StashStore, FileWatcher } from "filestash-sdk";
 import { writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -10,7 +10,7 @@ const FILE_PATH = join(TEST_DIR, "example.ts");
 const FILE_PATH_2 = join(TEST_DIR, "example2.ts");
 
 describe("MCP _meta field", () => {
-  let cache: CacheStore;
+  let stash: StashStore;
   let watcher: FileWatcher;
   let expectedNamespace: string;
 
@@ -19,8 +19,8 @@ describe("MCP _meta field", () => {
     mkdirSync(TEST_DIR, { recursive: true });
     writeFileSync(FILE_PATH, `function hello() {\n  console.log("hello world");\n}\n`);
     writeFileSync(FILE_PATH_2, `function goodbye() {\n  console.log("goodbye");\n}\n`);
-    ({ cache, watcher } = createCache({ dbPath: DB_PATH, sessionId: "test-session-mcp" }));
-    await cache.init();
+    ({ stash, watcher } = createStash({ dbPath: DB_PATH, sessionId: "test-session-mcp" }));
+    await stash.init();
 
     const packageJson = JSON.parse(readFileSync(join(import.meta.dirname, "../package.json"), "utf-8"));
     expectedNamespace = (packageJson.mcpName || "io.github.glommer/filestash").replace(/\//g, ".");
@@ -28,7 +28,7 @@ describe("MCP _meta field", () => {
 
   afterAll(async () => {
     watcher.close();
-    await cache.close();
+    await stash.close();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
@@ -45,7 +45,7 @@ describe("MCP _meta field", () => {
   });
 
   test("_meta value is an array of file paths", async () => {
-    const result = await cache.readFile(FILE_PATH);
+    const result = await stash.readFile(FILE_PATH);
     expect(result.hash).toBeTruthy();
     const metaKey = `${expectedNamespace}/files`;
     const meta: Record<string, string[]> = { [metaKey]: [FILE_PATH] };
@@ -54,18 +54,18 @@ describe("MCP _meta field", () => {
     expect(meta[metaKey]).toHaveLength(1);
   });
 
-  test("unchanged file read is cached and _meta key is stable", async () => {
-    const first = await cache.readFile(FILE_PATH);
-    expect(first.cached).toBe(true);
-    const second = await cache.readFile(FILE_PATH);
-    expect(second.cached).toBe(true);
+  test("unchanged file read is stashed and _meta key is stable", async () => {
+    const first = await stash.readFile(FILE_PATH);
+    expect(first.stashed).toBe(true);
+    const second = await stash.readFile(FILE_PATH);
+    expect(second.stashed).toBe(true);
     const metaKey = `${expectedNamespace}/files`;
     expect(metaKey).toMatch(/^io\.github\.\w+\.\w+\/files$/);
   });
 
   test("_meta with multiple files covers all paths", async () => {
-    const r1 = await cache.readFile(FILE_PATH);
-    const r2 = await cache.readFile(FILE_PATH_2);
+    const r1 = await stash.readFile(FILE_PATH);
+    const r2 = await stash.readFile(FILE_PATH_2);
     expect(r1.hash).toBeTruthy();
     expect(r2.hash).toBeTruthy();
     const metaKey = `${expectedNamespace}/files`;

@@ -1,4 +1,4 @@
-export interface CacheConfig {
+export interface StashConfig {
   /** Path to the database file */
   dbPath: string;
   /** Session identifier. Each session tracks its own read state independently. */
@@ -15,13 +15,13 @@ interface FileReadResultBase {
 }
 
 interface FileReadResultFresh extends FileReadResultBase {
-  cached: false;
+  stashed: false;
   /** Full file content */
   content: string;
 }
 
-interface FileReadResultCached extends FileReadResultBase {
-  cached: true;
+interface FileReadResultStashed extends FileReadResultBase {
+  stashed: true;
   /** Short confirmation label or diff content */
   content: string;
   /** Lines changed since last read */
@@ -30,10 +30,10 @@ interface FileReadResultCached extends FileReadResultBase {
   diff?: string;
 }
 
-export type FileReadResult = FileReadResultFresh | FileReadResultCached;
+export type FileReadResult = FileReadResultFresh | FileReadResultStashed;
 
-export interface CacheStats {
-  /** Total files cached */
+export interface StashStats {
+  /** Total files in the stash */
   filesTracked: number;
   /** Approximate tokens saved across all sessions */
   tokensSaved: number;

@@ -31,20 +31,20 @@ describe("isPathAllowed", () => {
 });
 
 describe("formatReadResult", () => {
-  test("returns content as-is when cached=false", () => {
-    const result = { cached: false as const, content: "hello world", hash: "abc", totalLines: 1 };
+  test("returns content as-is when stashed=false", () => {
+    const result = { stashed: false as const, content: "hello world", hash: "abc", totalLines: 1 };
     expect(formatReadResult(result)).toBe("hello world");
   });
 
-  test("returns content as-is when cached=true and no diff", () => {
-    const result = { cached: true as const, content: "[filestash: unchanged]", hash: "abc", totalLines: 5, linesChanged: 0 };
+  test("returns content as-is when stashed=true and no diff", () => {
+    const result = { stashed: true as const, content: "[filestash: unchanged]", hash: "abc", totalLines: 5, linesChanged: 0 };
     expect(formatReadResult(result)).toBe("[filestash: unchanged]");
   });
 
-  test("returns formatted diff string when cached=true with diff", () => {
+  test("returns formatted diff string when stashed=true with diff", () => {
     const diff = "@@ -1,2 +1,2 @@\n-old\n+new\n ctx";
     const result = {
-      cached: true as const,
+      stashed: true as const,
       content: diff,
       hash: "abc",
       totalLines: 10,

@@ -1,15 +1,15 @@
 import { watch as fsWatch, existsSync, type FSWatcher } from "node:fs";
 import { resolve } from "node:path";
-import type { CacheStore } from "./cache.js";
+import type { StashStore } from "./stash.js";
 
 export class FileWatcher {
   private watchers: FSWatcher[] = [];
-  private readonly cache: CacheStore;
+  private readonly stash: StashStore;
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly debounceMs: number;
 
-  constructor(cache: CacheStore, debounceMs = 100) {
-    this.cache = cache;
+  constructor(stash: StashStore, debounceMs = 100) {
+    this.stash = stash;
     this.debounceMs = debounceMs;
   }
 
@@ -54,7 +54,7 @@ export class FileWatcher {
   private async handleChange(filePath: string): Promise<void> {
     try {
       if (!existsSync(filePath)) {
-        await this.cache.onFileDeleted(filePath);
+        await this.stash.onFileDeleted(filePath);
       }
     } catch (e: unknown) {
       process.stderr.write(`[filestash] watcher error on ${filePath}: ${e instanceof Error ? e.message : String(e)}\n`);

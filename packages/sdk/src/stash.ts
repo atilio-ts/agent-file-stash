@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { computeDiff, type DiffResult } from "./differ.js";
-import type { CacheConfig, CacheStats, FileReadResult } from "./types.js";
+import type { StashConfig, StashStats, FileReadResult } from "./types.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS file_versions (
@@ -66,13 +66,13 @@ function queryOne<T>(db: DatabaseSync, sql: string, params: (string | number)[] 
   return rows[0];
 }
 
-export class CacheStore {
+export class StashStore {
   private db: DatabaseSync | null = null;
   private readonly dbPath: string;
   private readonly sessionId: string;
   private initialized = false;
 
-  constructor(config: CacheConfig) {
+  constructor(config: StashConfig) {
     this.dbPath = config.dbPath;
     this.sessionId = config.sessionId;
   }
@@ -86,7 +86,7 @@ export class CacheStore {
   }
 
   private getDb(): DatabaseSync {
-    if (!this.db) throw new Error("CacheStore not initialized. Call init() first.");
+    if (!this.db) throw new Error("StashStore not initialized. Call init() first.");
     return this.db;
   }
 
@@ -155,7 +155,7 @@ export class CacheStore {
       "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
     ).run(this.sessionId, s.absPath, s.currentHash, s.now);
 
-    return { cached: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+    return { stashed: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
   }
 
   private handleUnchanged(db: DatabaseSync, s: ReadState): FileReadResult {
@@ -170,7 +170,7 @@ export class CacheStore {
       ? `[filestash: unchanged, lines ${s.rangeStart}-${s.rangeEnd} of ${s.currentLines}, ${slicedTokens} tokens saved]`
       : `[filestash: unchanged, ${s.currentLines} lines, ${slicedTokens} tokens saved]`;
 
-    return { cached: true, content: label, hash: s.currentHash, totalLines: s.currentLines, linesChanged: 0 };
+    return { stashed: true, content: label, hash: s.currentHash, totalLines: s.currentLines, linesChanged: 0 };
   }
 
   private handleChanged(db: DatabaseSync, s: ReadState, lastHash: string): FileReadResult {
@@ -193,7 +193,7 @@ export class CacheStore {
       }
     }
 
-    return { cached: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+    return { stashed: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
   }
 
   private handlePartialDiff(db: DatabaseSync, s: ReadState, diffResult: DiffResult): FileReadResult {
@@ -201,7 +201,7 @@ export class CacheStore {
       const slicedTokens = estimateTokens(this.sliceContent(s));
       this.addTokensSaved(db, slicedTokens);
       return {
-        cached: true,
+        stashed: true,
         content: `[filestash: unchanged in lines ${s.rangeStart}-${s.rangeEnd}, changes elsewhere in file, ${slicedTokens} tokens saved]`,
         hash: s.currentHash,
         totalLines: s.currentLines,
@@ -209,7 +209,7 @@ export class CacheStore {
       };
     }
 
-    return { cached: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+    return { stashed: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
   }
 
   private handleFullDiff(db: DatabaseSync, s: ReadState, diffResult: DiffResult): FileReadResult {
@@ -217,7 +217,7 @@ export class CacheStore {
     this.addTokensSaved(db, saved);
 
     return {
-      cached: true,
+      stashed: true,
       content: diffResult.diff,
       diff: diffResult.diff,
       hash: s.currentHash,
@@ -259,7 +259,7 @@ export class CacheStore {
       "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
     ).run(this.sessionId, absPath, hash, now);
 
-    return { cached: false, content, hash, totalLines: lines };
+    return { stashed: false, content, hash, totalLines: lines };
   }
 
   async onFileDeleted(filePath: string): Promise<void> {
@@ -270,7 +270,7 @@ export class CacheStore {
     db.prepare("DELETE FROM session_reads WHERE path = ?").run(absPath);
   }
 
-  async getStats(): Promise<CacheStats> {
+  async getStats(): Promise<StashStats> {
     await this.init();
     const db = this.getDb();
 

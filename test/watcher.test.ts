@@ -1,15 +1,15 @@
 import { describe, test, expect, beforeAll, afterAll, vi } from "vitest";
 import { FileWatcher } from "filestash-sdk";
-import type { CacheStore } from "filestash-sdk";
+import type { StashStore } from "filestash-sdk";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 const TEST_DIR = join(import.meta.dirname, ".tmp_test_watcher");
 
-function makeMockCache(): CacheStore {
+function makeMockStash(): StashStore {
   return {
     onFileDeleted: vi.fn().mockResolvedValue(undefined),
-  } as unknown as CacheStore;
+  } as unknown as StashStore;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -30,14 +30,14 @@ describe("FileWatcher", () => {
     const filePath = join(TEST_DIR, "a.ts");
     writeFileSync(filePath, "const a = 1;\n");
 
-    const cache = makeMockCache();
-    const watcher = new FileWatcher(cache, 20);
+    const stash = makeMockStash();
+    const watcher = new FileWatcher(stash, 20);
     watcher.watch([TEST_DIR]);
 
     rmSync(filePath);
     await sleep(120); // debounce(20) + buffer
 
-    expect(cache.onFileDeleted).toHaveBeenCalledWith(filePath);
+    expect(stash.onFileDeleted).toHaveBeenCalledWith(filePath);
     watcher.close();
   });
 
@@ -45,8 +45,8 @@ describe("FileWatcher", () => {
     const filePath = join(TEST_DIR, "b.ts");
     writeFileSync(filePath, "const b = 1;\n");
 
-    const cache = makeMockCache();
-    const watcher = new FileWatcher(cache, 80);
+    const stash = makeMockStash();
+    const watcher = new FileWatcher(stash, 80);
     watcher.watch([TEST_DIR]);
 
     // Rapid create/delete cycles on same path generate multiple fs events
@@ -59,8 +59,8 @@ describe("FileWatcher", () => {
 
     await sleep(250); // debounce(80) + generous buffer
 
-    expect(cache.onFileDeleted).toHaveBeenCalledTimes(1);
-    expect(cache.onFileDeleted).toHaveBeenCalledWith(filePath);
+    expect(stash.onFileDeleted).toHaveBeenCalledTimes(1);
+    expect(stash.onFileDeleted).toHaveBeenCalledWith(filePath);
     watcher.close();
   });
 
@@ -68,8 +68,8 @@ describe("FileWatcher", () => {
     const filePath = join(TEST_DIR, "c.ts");
     writeFileSync(filePath, "const c = 1;\n");
 
-    const cache = makeMockCache();
-    const watcher = new FileWatcher(cache, 500); // long debounce
+    const stash = makeMockStash();
+    const watcher = new FileWatcher(stash, 500); // long debounce
     watcher.watch([TEST_DIR]);
 
     rmSync(filePath);
@@ -77,6 +77,6 @@ describe("FileWatcher", () => {
     watcher.close(); // cancel the timer before it fires
 
     await sleep(600); // wait longer than debounce — nothing should fire
-    expect(cache.onFileDeleted).not.toHaveBeenCalled();
+    expect(stash.onFileDeleted).not.toHaveBeenCalled();
   });
 });
