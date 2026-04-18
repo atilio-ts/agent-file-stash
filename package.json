@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "bench": "tsx bench/bench.ts",
+    "benchmark": "tsx test/benchmark.ts",
     "prepublishOnly": "pnpm run build",
     "test": "vitest run"
   },

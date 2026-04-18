@@ -10,6 +10,8 @@
     "declaration": true,
     "types": ["node"],
     "lib": ["ES2022"],
-    "noImplicitOverride": true
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true
   }
 }

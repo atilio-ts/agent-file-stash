@@ -51,13 +51,13 @@ function buildRawLines(
       newIdx < newLines.length && newLines[newIdx] === lcs[lcsIdx];
 
     if (atLcsMatch) {
-      rawLines.push({ type: "keep", line: oldLines[oldIdx], oldLine: oldIdx + 1, newLine: newIdx + 1 });
+      rawLines.push({ type: "keep", line: oldLines[oldIdx]!, oldLine: oldIdx + 1, newLine: newIdx + 1 });
       oldIdx++; newIdx++; lcsIdx++;
     } else if (newIdx < newLines.length && (lcsIdx >= lcs.length || newLines[newIdx] !== lcs[lcsIdx])) {
-      rawLines.push({ type: "add", line: newLines[newIdx], oldLine: oldIdx + 1, newLine: newIdx + 1 });
+      rawLines.push({ type: "add", line: newLines[newIdx]!, oldLine: oldIdx + 1, newLine: newIdx + 1 });
       newIdx++; linesChanged++;
     } else {
-      rawLines.push({ type: "remove", line: oldLines[oldIdx], oldLine: oldIdx + 1, newLine: newIdx + 1 });
+      rawLines.push({ type: "remove", line: oldLines[oldIdx]!, oldLine: oldIdx + 1, newLine: newIdx + 1 });
       oldIdx++; linesChanged++;
     }
   }
@@ -81,7 +81,7 @@ function groupIntoHunks(rawLines: DiffLine[]): DiffLine[][] {
   let lastChangeIdx = -999;
 
   for (let i = 0; i < rawLines.length; i++) {
-    const line = rawLines[i];
+    const line = rawLines[i]!;
 
     if (line.type === "keep") {
       if (current.length > 0 && i - lastChangeIdx <= CONTEXT) {
@@ -117,8 +117,8 @@ function fillContextGap(current: DiffLine[], rawLines: DiffLine[], lastChangeIdx
   const contextEnd = lastChangeIdx + CONTEXT + 1;
   const inCurrent = new Set(current);
   for (let c = contextEnd; c < upTo; c++) {
-    const line = rawLines[c];
-    if (line !== undefined && !inCurrent.has(line)) {
+    const line = rawLines[c]!;
+    if (!inCurrent.has(line)) {
       current.push(line);
       inCurrent.add(line);
     }
@@ -130,13 +130,13 @@ function formatDiff(hunkGroups: DiffLine[][], filePath: string): string {
 
   for (const hunk of hunkGroups) {
     if (hunk.length === 0) continue;
-    const first = hunk[0];
+    const first = hunk[0]!;
     const oldCount = hunk.filter(dl => dl.type === "keep" || dl.type === "remove").length;
     const newCount = hunk.filter(dl => dl.type === "keep" || dl.type === "add").length;
     lines.push(`@@ -${first.oldLine},${oldCount} +${first.newLine},${newCount} @@`);
     const prefixMap: Record<DiffLine["type"], string> = { add: "+", remove: "-", keep: " " };
     for (const dl of hunk) {
-      const prefix = prefixMap[dl.type];
+      const prefix = prefixMap[dl.type]!;
       lines.push(`${prefix}${dl.line}`);
     }
   }
@@ -159,10 +159,10 @@ function longestCommonSubsequence(a: string[], b: string[]): string[] {
 
   for (let i = 1; i <= m; i++) {
     for (let j = 1; j <= n; j++) {
-      if (a[i - 1] === b[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
+      if (a[i - 1]! === b[j - 1]!) {
+        dp[i]![j]! = dp[i - 1]![j - 1]! + 1;
       } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+        dp[i]![j]! = Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
       }
     }
   }
@@ -170,10 +170,10 @@ function longestCommonSubsequence(a: string[], b: string[]): string[] {
   const result: string[] = [];
   let i = m, j = n;
   while (i > 0 && j > 0) {
-    if (a[i - 1] === b[j - 1]) {
-      result.unshift(a[i - 1]);
+    if (a[i - 1]! === b[j - 1]!) {
+      result.unshift(a[i - 1]!);
       i--; j--;
-    } else if (dp[i - 1][j] > dp[i][j - 1]) {
+    } else if (dp[i - 1]![j]! > dp[i]![j - 1]!) {
       i--;
     } else {
       j--;

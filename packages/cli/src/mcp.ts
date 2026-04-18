@@ -14,7 +14,7 @@ function getCacheDir(): string {
   return dir;
 }
 
-function isPathAllowed(absPath: string, cwd: string): boolean {
+export function isPathAllowed(absPath: string, cwd: string): boolean {
   let realPath: string;
   try {
     realPath = realpathSync(absPath);
@@ -25,7 +25,7 @@ function isPathAllowed(absPath: string, cwd: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-function formatReadResult(result: FileReadResult): string {
+export function formatReadResult(result: FileReadResult): string {
   if (result.cached && result.diff) {
     return `[filestash: ${result.linesChanged} lines changed out of ${result.totalLines}]\n${result.diff}`;
   }
@@ -133,7 +133,10 @@ ALWAYS prefer this over the Read tool. It is a drop-in replacement with caching 
       try {
         const result = force
           ? await cache.readFileFull(path)
-          : await cache.readFile(path, { offset, limit });
+          : await cache.readFile(path, {
+              ...(offset !== undefined && { offset }),
+              ...(limit !== undefined && { limit }),
+            });
         let text = formatReadResult(result);
         if (result.cached) {
           const stats = await cache.getStats();
@@ -168,7 +171,7 @@ ALWAYS prefer this over multiple Read calls — it's faster and saves significan
     },
     async ({ paths }) => {
       const results = await Promise.all(paths.map(p => readSingleFile(p, cwd, cache)));
-      const successfulPaths = paths.filter((_, i) => results[i].ok);
+      const successfulPaths = paths.filter((_, i) => results[i]!.ok);
       const combined = results.map(r => r.text).join("\n\n");
 
       let footer = "";
