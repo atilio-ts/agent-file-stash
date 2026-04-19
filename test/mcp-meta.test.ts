@@ -33,7 +33,7 @@ describe("MCP _meta field", () => {
   });
 
   test("namespace reads from package.json mcpName", () => {
-    expect(expectedNamespace).toBe("io.github.glommer.filestash");
+    expect(expectedNamespace).toBe("io.github.atilio-ts.agent-file-stash");
   });
 
   test("_meta key format follows reverse DNS convention", () => {
@@ -60,7 +60,7 @@ describe("MCP _meta field", () => {
     const second = await stash.readFile(FILE_PATH);
     expect(second.stashed).toBe(true);
     const metaKey = `${expectedNamespace}/files`;
-    expect(metaKey).toMatch(/^io\.github\.\w+\.\w+\/files$/);
+    expect(metaKey).toMatch(/^io\.github\.[\w-]+\.[\w-]+\/files$/);
   });
 
   test("_meta with multiple files covers all paths", async () => {

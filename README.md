@@ -4,107 +4,41 @@
 
 # agent-file-stash
 
-File cache with diff tracking for AI coding agents. Powered by SQLite (`node:sqlite`, built into Node.js 24+).
+> File stash with diff tracking for AI coding agents. Drop-in replacement for file reads that cuts token usage in half.
 
-Agents waste most of their token budget re-reading files they've already seen. agent-file-stash fixes this: on first read it caches the file, on subsequent reads it returns either "unchanged" (one line instead of the whole file) or a compact diff of what changed. Drop-in replacement for file reads that agents adopt on their own.
+[![npm version](https://img.shields.io/npm/v/agent-file-stash)](https://www.npmjs.com/package/agent-file-stash)
+[![Node.js >=24](https://img.shields.io/badge/node-%3E%3D24-brightgreen)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
-## Benchmark
+## Highlights
 
-### Real-world A/B test
+- **50% fewer tokens** on repeated file reads — verified on real codebases
+- **Zero config** — one command auto-configures Claude Code, Cursor, and OpenCode
+- **No external services** — SQLite backed by Node.js 24 built-ins, no network required
+- **Partial-read aware** — stashes line ranges independently; returns `[unchanged in lines 50-59]` when only other parts changed
+- **Agents adopt it on their own** — tool descriptions alone are enough; no explicit instructions needed
 
-We ran the same refactoring task on a 268-file TypeScript codebase ([opencode](https://github.com/sst/opencode)) twice — same agent (Claude Opus), same prompt — with agent-file-stash enabled or disabled as the only variable.
+## Table of Contents
 
-| | Without agent-file-stash | With agent-file-stash |
-|---|---:|---:|
-| Total tokens | 158,248 | 117,188 |
-| Tool calls | 60 | 58 |
-| Files touched | 12 | 12 |
-
-**26% fewer tokens. Same task, same result.** Every token an AI model processes costs money and adds latency. agent-file-stash eliminated ~33,000 tokens by returning compact stash labels and diffs instead of resending full file contents the agent had already seen.
-
-The savings grow across consecutive tasks on the same codebase, because more files are already stashed when each new task starts:
-
-| Task | Tokens used | Tokens saved | Cumulative savings |
-|------|------------:|-------------:|-------------------:|
-| 1. Add session export command | 62,190 | 2,925 | 2,925 |
-| 2. Add --since flag to session list | 41,167 | 15,571 | 18,496 |
-| 3. Add session stats subcommand | 63,169 | 35,355 | 53,851 |
-
-By task 3, agent-file-stash saved **35,355 tokens in a single task** — a 36% reduction. Over the full 3-task sequence: **53,851 tokens saved out of 166,526 consumed (24% less)**.
-
-### Agent simulation
-
-The real-world test proves agent-file-stash works. The simulation explains *why* and *how much*, in a controlled, reproducible environment.
-
-**What it models:** the most common agent workflow — read a set of files to understand the code, make an edit, then read those files again to verify or continue. We generated 10 TypeScript files of mixed sizes (50–1,000 lines), ran this two-pass workflow, and measured token usage and wall-clock time against plain file reads. Each scenario was averaged over 5 runs.
-
-- **Session A** — the first exploration pass. The agent reads all 10 files for the first time. agent-file-stash has no prior state yet, so it returns full file content, just like a normal read. No savings — this is the baseline.
-- **Session B** — the follow-up pass, after one file has been edited. The agent re-reads the same 10 files. Now agent-file-stash knows exactly what the agent already saw: 9 unchanged files each return a single-line stash label (e.g. `[filestash: unchanged, 245 lines, 1,837 tokens saved]`), and the 1 edited file returns only a compact diff of what changed.
-
-#### Token impact
-
-| Scenario | Pass | Tokens (raw) | Tokens (agent-file-stash) | Savings |
-|----------|------|-------------:|-------------------:|--------:|
-| 10 files, 1 edit | A — first read | 85,452 | 85,452 | 0 % |
-| 10 files, 1 edit | B — re-read | 85,459 | 488 | **99 %** |
-| 10 files, 1 edit | Total | 170,911 | 85,940 | **50 %** |
-
-Session B consumed just **488 tokens** instead of 85,459. Those 488 tokens are 9 tiny stash labels plus one compact diff — replacing the entire file payload the agent would otherwise have re-read. Over both passes together, the agent used half the tokens it would have needed without agent-file-stash.
-
-**How savings scale with file count** (1 edit, both passes combined):
-
-| Files read | Tokens (raw) | Tokens (agent-file-stash) | Savings |
-|:----------:|-------------:|-------------------:|--------:|
-| 3 | 13,867 | 7,322 | 47 % |
-| 5 | 29,807 | 15,318 | 49 % |
-| 10 | 170,911 | 85,940 | 50 % |
-| 20 | 309,413 | 155,325 | 50 % |
-
-Savings stay near 50% regardless of how many files the agent reads. The benefit scales linearly — more files means more absolute tokens saved, at the same rate.
-
-**How savings change with edit frequency** (10 files, both passes combined):
-
-| Files edited | Tokens (raw) | Tokens (agent-file-stash) | Savings |
-|:------------:|-------------:|-------------------:|--------:|
-| 0 of 10 | 170,904 | 85,587 | 50 % |
-| 1 of 10 | 170,911 | 85,940 | 50 % |
-| 3 of 10 | 170,964 | 88,207 | 48 % |
-| 5 of 10 | 171,034 | 90,979 | 47 % |
-
-Even when half the files are edited, savings stay above 47%. Diffs are much smaller than full files — a 5% edit on a 200-line file produces a diff of roughly 10 lines, far cheaper than re-reading the entire file.
-
-#### Latency
-
-agent-file-stash adds a small SQLite lookup to each file read. Here is the honest cost:
-
-| Scenario | Pass | Raw read | Filestash read | Overhead |
-|----------|------|:--------:|:--------------:|:--------:|
-| 10 files, 1 edit | A | 348 µs | 2.60 ms | +649 % |
-| 10 files, 1 edit | B | 311 µs | 2.21 ms | +611 % |
-| 20 files, 1 edit | B | 573 µs | 4.31 ms | +652 % |
-
-The percentage overhead looks large, but the absolute cost is about **2 ms per 10-file read pass**. LLM inference takes seconds; file I/O is never the bottleneck. In practice this overhead is invisible to the user.
-
-### Single-file read latency
-
-How fast individual reads are across different file sizes (averaged over 100 iterations):
-
-| File size | First read | Stashed read | Diff read | Token savings (stashed) |
-|-----------|:----------:|:------------:|:---------:|:-----------------------:|
-| small (50 lines) | 146 µs | 122 µs | 296 µs | ~99 % |
-| medium (200 lines) | 186 µs | 148 µs | 798 µs | ~100 % |
-| large (1,000 lines) | 382 µs | 306 µs | 19.96 ms | ~100 % |
-
-_Node.js built-in `node:sqlite`, WAL mode, warm OS page cache. Run `pnpm benchmark` to reproduce._
-
-### Agents adopt it without being told
-
-We tested whether agents would use agent-file-stash voluntarily. We launched a coding agent with agent-file-stash configured as an MCP server but **gave the agent no instructions about it**. The agent chose `agent-file-stash.read_file` over the built-in Read tool on its own. The tool descriptions alone were enough.
+- [How it works](#how-it-works)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [As an MCP server](#as-an-mcp-server-recommended)
+  - [As a CLI](#as-a-cli)
+  - [As an SDK](#as-an-sdk)
+- [Benchmark](#benchmark)
+- [Project Structure](#project-structure)
+- [Architecture](#architecture)
+- [FAQ](#faq)
+- [License](#license)
 
 ## How it works
 
+Agents waste most of their token budget re-reading files they've already seen. agent-file-stash fixes this: on first read it stashes the file, on subsequent reads it returns either "unchanged" (one line instead of the whole file) or a compact diff of what changed.
+
 ```
-First read:   agent reads src/auth.ts → agent-file-stash caches content + hash → returns full file
+First read:   agent reads src/auth.ts → stashes content + hash → returns full file
 Second read:  agent reads src/auth.ts → hash unchanged → returns "[unchanged, 245 lines, 1,837 tokens saved]"
 After edit:   agent reads src/auth.ts → hash changed → returns unified diff (only changed lines)
 Partial read: agent reads lines 50-60 → edit changed line 200 → returns "[unchanged in lines 50-60]"
@@ -112,15 +46,19 @@ Partial read: agent reads lines 50-60 → edit changed line 200 → returns "[un
 
 The stash persists in a local SQLite database (Node.js built-in `node:sqlite`, WAL mode). Content hashing (SHA-256) detects changes. No network, no external services, no configuration beyond a file path.
 
+## Prerequisites
+
+- **Node.js 24 or later** — agent-file-stash uses `node:sqlite`, a built-in module available from Node.js 24
+
 ## Installation
 
 ```bash
-npx agent-file-stash init     # auto-configures Claude Code, Cursor, OpenCode
+npx agent-file-stash init
 ```
 
-That's it. Restart your editor and agent-file-stash is active. Agents discover it automatically.
+This auto-configures agent-file-stash for any editors it detects (Claude Code, Cursor, OpenCode). Restart your editor and agents will start using it automatically.
 
-Or configure manually — add to your MCP config (`.claude.json`, `.cursor/mcp.json`, etc.):
+**Manual configuration** — add to your MCP config (`.claude.json`, `.cursor/mcp.json`, etc.):
 
 ```json
 {
@@ -137,86 +75,195 @@ Or configure manually — add to your MCP config (`.claude.json`, `.cursor/mcp.j
 
 ### As an MCP server (recommended)
 
-The MCP server exposes 4 tools:
+The MCP server exposes 4 tools that agents discover and use automatically:
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read a file with caching. Returns full content on first read, "unchanged" or diff on subsequent reads. Supports `offset`/`limit` for partial reads. |
-| `read_files` | Batch read multiple files with caching. |
-| `cache_status` | Show stats: files tracked, tokens saved. |
-| `cache_clear` | Reset the cache. |
-
-Agents discover these tools automatically and prefer them over built-in file reads because the tool descriptions advertise token savings.
+| `read_file` | Read a file with stashing. Returns full content on first read, `[unchanged]` label or diff on subsequent reads. Supports `offset`/`limit` for partial reads. |
+| `read_files` | Batch read multiple files at once with stashing. |
+| `stash_status` | Show stats: files tracked, tokens saved (total and per session). |
+| `stash_clear` | Reset the stash (clears all cached content and stats). |
 
 ### As a CLI
 
 ```bash
-agent-file-stash serve      # Start the MCP server
-agent-file-stash status     # Show cache statistics
+agent-file-stash init       # Auto-configure for Claude Code, Cursor, OpenCode
+agent-file-stash serve      # Start the MCP server (default when no command given)
+agent-file-stash status     # Show stash statistics
 agent-file-stash help       # Show help
 ```
 
-Set `FILESTASH_DIR` to control where the stash database is stored (default: `.file-stash/` in the current directory).
+**Environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `FILESTASH_DIR` | `.file-stash/` | Directory where the stash database is stored |
 
 ### As an SDK
 
-```typescript
-import { createCache } from "agent-file-stash";
+Install and import directly if you want to embed stashing in your own tooling:
 
-const { cache, watcher } = createCache({
-  dbPath: "./my-cache.db",
+```bash
+npm install agent-file-stash
+```
+
+```typescript
+import { createStash } from "agent-file-stash";
+
+const { stash, watcher } = createStash({
+  dbPath: "./my-stash.db",
   sessionId: "my-session-1",  // each session tracks reads independently
   watchPaths: ["."],          // optional: watch for file changes
 });
 
-await cache.init();
+await stash.init();
 
-// First read — returns full content, caches it
-const r1 = await cache.readFile("src/auth.ts");
-// r1.cached === false
+// First read — returns full content, stashes it
+const r1 = await stash.readFile("src/auth.ts");
+// r1.stashed === false
 // r1.content === "import { jwt } from ..."
 
-// Second read — file unchanged, returns confirmation
-const r2 = await cache.readFile("src/auth.ts");
-// r2.cached === true
+// Second read — file unchanged
+const r2 = await stash.readFile("src/auth.ts");
+// r2.stashed === true
 // r2.content === "[filestash: unchanged, 245 lines, 1837 tokens saved]"
 // r2.linesChanged === 0
 
-// After file is modified — returns diff
-const r3 = await cache.readFile("src/auth.ts");
-// r3.cached === true
+// After file is modified — returns unified diff
+const r3 = await stash.readFile("src/auth.ts");
+// r3.stashed === true
 // r3.diff === "--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -10,3 +10,4 @@..."
 // r3.linesChanged === 3
 
 // Partial read — only the lines you need
-const r4 = await cache.readFile("src/auth.ts", { offset: 50, limit: 10 });
+const r4 = await stash.readFile("src/auth.ts", { offset: 50, limit: 10 });
 // Returns lines 50-59, or "[unchanged in lines 50-59]" if nothing changed there
 
+// Force a full re-read (bypasses stash, resets session tracking for this file)
+const r5 = await stash.readFileFull("src/auth.ts");
+// r5.stashed === false — always returns full content
+
 // Stats
-const stats = await cache.getStats();
+const stats = await stash.getStats();
 // { filesTracked: 12, tokensSaved: 53851, sessionTokensSaved: 33205 }
 
 // Cleanup
 watcher.close();
+await stash.close();
 ```
 
-## Architecture
+**SDK reference:**
+
+| Method | Description |
+|---|---|
+| `stash.init()` | Initialize the database (called automatically on first read) |
+| `stash.readFile(path, opts?)` | Read with stashing. Options: `{ offset?: number; limit?: number }` |
+| `stash.readFileFull(path)` | Always return full content and reset session tracking for this file |
+| `stash.getStats()` | Return `{ filesTracked, tokensSaved, sessionTokensSaved }` |
+| `stash.clear()` | Wipe all stashed content and stats |
+| `stash.close()` | Close the database connection |
+
+## Benchmark
+
+Tested on a real 268-file TypeScript codebase ([opencode](https://github.com/sst/opencode)) — same agent, same prompt, only the stash toggled:
+
+| | Without | With |
+|---|---:|---:|
+| Total tokens | 158,248 | 117,188 |
+| Tool calls | 60 | 58 |
+
+**26% fewer tokens on a single task.** Savings compound across consecutive tasks as more files are already stashed:
+
+| Task | Tokens saved | Cumulative |
+|------|-------------:|-----------:|
+| 1. Add session export command | 2,925 | 2,925 |
+| 2. Add --since flag to session list | 15,571 | 18,496 |
+| 3. Add session stats subcommand | 35,355 | 53,851 |
+
+**53,851 tokens saved over 3 tasks (24% less).** By task 3 alone: 36% reduction.
+
+### Simulation results
+
+A controlled two-pass workflow (read → edit → re-read) across 10 TypeScript files, averaged over 5 runs:
+
+| Pass | Tokens (raw) | Tokens (stashed) | Savings |
+|------|-------------:|-----------------:|--------:|
+| A — first read | 85,452 | 85,452 | 0 % |
+| B — re-read after 1 edit | 85,459 | 488 | **99 %** |
+| Total | 170,911 | 85,940 | **50 %** |
+
+On re-read, 9 unchanged files each return a single stash label and the edited file returns only a diff — **488 tokens instead of 85,459**.
+
+Savings hold across file count and edit frequency: ~50% at 3, 5, 10, or 20 files; above 47% even when half the files are edited. The SQLite overhead is ~2 ms per 10-file pass — invisible next to LLM latency.
+
+_Run `pnpm benchmark` to reproduce._
+
+## Project Structure
 
 ```
 packages/
-  sdk/     agent-file-stash — the core library
-           - CacheStore: content-addressed file cache backed by an embedded database
-           - FileWatcher: fs.watch wrapper for change notification
-           - computeDiff: line-based unified diff
-  cli/     agent-file-stash — batteries-included CLI + MCP server
+├── sdk/src/
+│   ├── index.ts      Public exports: createStash, StashStore, FileWatcher, computeDiff, types
+│   ├── stash.ts      StashStore — SQLite-backed content-addressed stash with per-session read tracking
+│   ├── differ.ts     computeDiff — line-based LCS diff (unified format, LCS capped at 5 000 lines)
+│   ├── watcher.ts    FileWatcher — debounced fs.watch wrapper that evicts deleted files from the stash
+│   └── types.ts      StashConfig, FileReadResult, StashStats type definitions
+│
+└── cli/src/
+    ├── index.ts      CLI entry point — init, serve, status, help commands
+    └── mcp.ts        MCP server — registers read_file, read_files, stash_status, stash_clear tools
+
+test/
+├── smoke.test.ts         End-to-end flows: first read, stash hit, diff on change, partial reads, multi-session isolation
+├── differ.test.ts        Unit tests for computeDiff: add/remove/mixed edits, context lines, LCS size limit
+├── stash-errors.test.ts  Error paths: missing file, clear(), onFileDeleted(), post-close re-init
+├── watcher.test.ts       FileWatcher: deletion detection, debounce coalescence, close() cancellation
+├── mcp-tools.test.ts     Unit tests for isPathAllowed (path traversal guard) and formatReadResult
+├── mcp-meta.test.ts      Validates the _meta field format and reverse-DNS namespace convention
+└── benchmark.ts          Reproducible two-pass simulation across generated TypeScript files (pnpm benchmark)
 ```
 
-**Database:** Single SQLite file (Node.js built-in `node:sqlite`, WAL mode) with `file_versions` (content-addressed, keyed by path + hash), `session_reads` (per-session read pointers), and `stats`/`session_stats` tables. Multiple sessions and branch switches are handled correctly — each session tracks which version it last saw.
+The SDK has no external dependencies — it uses only Node.js built-ins (`node:sqlite`, `node:crypto`, `node:fs`). The CLI adds the MCP layer via `@modelcontextprotocol/sdk` and `zod` for schema validation.
 
-**Change detection:** On every read, agent-file-stash hashes the current file content and compares it to the cached hash. Same hash = unchanged. Different hash = compute diff, update cache. No polling, no watchers required for correctness — the hash is the source of truth.
+## Architecture
 
-**Token estimation:** `ceil(characters / 4)`. Rough but directionally correct for code (~1 token per 4 characters). Good enough for the "tokens saved" metric.
+**Database:** Single SQLite file (`node:sqlite`, WAL mode) with four tables:
+
+| Table | Purpose |
+|---|---|
+| `file_versions` | Content-addressed storage, keyed by `(path, hash)` |
+| `session_reads` | Per-session read pointers — tracks which version each session last saw |
+| `stats` | Global token-savings counter |
+| `session_stats` | Per-session token-savings counter |
+
+Multiple sessions and branch switches are handled correctly — each session independently tracks which file version it last read, so switching branches or running multiple agents in parallel produces correct diffs for each.
+
+**Change detection:** On every read, the current file content is hashed (SHA-256, truncated to 16 hex chars). Same hash = unchanged. Different hash = compute diff, update stash. No polling or watchers required for correctness — the hash is the source of truth. File watchers are optional and only used to proactively evict deleted files.
+
+**Diff algorithm:** Line-based unified diff (`computeDiff`). Groups changed lines into hunks with context lines, identical to the output of `git diff`. Diffs are stored as strings and returned verbatim to the agent.
+
+**Token estimation:** `ceil(characters / 4)`. Rough but directionally correct for code. Used only for the "tokens saved" metric — never affects correctness.
+
+## FAQ
+
+**Does it work with agents other than Claude?**
+Yes. agent-file-stash is an MCP server — any MCP-compatible agent (Cursor, OpenCode, etc.) can use it.
+
+**Where is the stash database stored?**
+By default in `.file-stash/stash.db` inside the current working directory. Set `FILESTASH_DIR` to change this.
+
+**Is the stash shared across sessions?**
+File content is shared (content-addressed, so identical files are stored once). Read state is tracked per `sessionId` — each session independently knows which file version it last saw, so two agents running in parallel get correct diffs independently.
+
+**What happens when I switch git branches?**
+agent-file-stash detects the new file content via hashing and returns a diff automatically on the next read. No manual reset needed.
+
+**Does clearing the stash affect my source files?**
+No. `stash_clear` (or `stash.clear()`) only removes the stash database contents. Your source files are never modified.
+
+**What Node.js version do I need?**
+Node.js 24 or later. The `node:sqlite` module was stabilized in Node.js 24.
 
 ## License
 
-MIT
+[MIT](./LICENSE)
