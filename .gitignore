@@ -14,3 +14,6 @@ temporary
 
 graphify-out
 .mcp.json
+
+.DS_Store
+*.iml

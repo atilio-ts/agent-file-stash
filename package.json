@@ -1,11 +1,11 @@
 {
-  "name": "filestash",
+  "name": "agent-file-stash",
   "version": "0.2.1",
-  "mcpName": "io.github.glommer/filestash",
-  "description": "File stash with diff tracking for AI coding agents. Drop-in replacement for file reads that saves ~26% tokens.",
+  "mcpName": "io.github.atilio-ts/agent-file-stash",
+  "description": "File stash with diff tracking for AI coding agents. Drop-in replacement for file reads that saves tokens.",
   "type": "module",
   "bin": {
-    "filestash": "dist/cli.mjs"
+    "agent-file-stash": "dist/cli.mjs"
   },
   "files": [
     "dist",

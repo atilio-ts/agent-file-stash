@@ -4,7 +4,7 @@
 
 # Tool output folders (machine-specific, no semantic value)
 graphify-out/
-.cachebro/
+.file-stash/
 temporary/
 
 # IDE and OS noise
