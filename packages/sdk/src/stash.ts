@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -79,6 +79,7 @@ export class StashStore {
 
   async init(): Promise<void> {
     if (this.initialized) return;
+    const { DatabaseSync } = await import("node:sqlite");
     this.db = new DatabaseSync(this.dbPath);
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec(SCHEMA);

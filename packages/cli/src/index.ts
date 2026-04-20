@@ -4,6 +4,13 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { startMcpServer } from "./mcp.js";
 
+// Suppress the node:sqlite experimental warning before sqlite is dynamically loaded
+const _origEmitWarning = process.emitWarning;
+(process as NodeJS.Process).emitWarning = function (msg, ...args) {
+  if (typeof msg === "string" && msg.includes("SQLite")) return;
+  return _origEmitWarning.apply(process, [msg, ...(args as [])] as Parameters<typeof process.emitWarning>);
+};
+
 const CLI_STATUS_SESSION = "cli-status";
 
 async function runStatus(): Promise<void> {
@@ -31,12 +38,12 @@ async function runInit(): Promise<void> {
 
   const mcpServersEntry = {
     command: "npx",
-    args: ["filestash", "serve"],
+    args: ["agent-file-stash", "serve"],
   };
 
   const opencodeMcpEntry = {
     type: "local" as const,
-    command: ["npx", "filestash", "serve"],
+    command: ["npx", "agent-file-stash", "serve"],
   };
 
   const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, ".config");
@@ -92,20 +99,26 @@ async function runInit(): Promise<void> {
 
   if (configured === 0) {
     console.log("No supported tools detected. You can manually add filestash to your MCP config:");
-    console.log(JSON.stringify({ mcpServers: { filestash: mcpServersEntry } }, null, 2));
+    console.log(JSON.stringify({ mcpServers: { "agent-file-stash": mcpServersEntry } }, null, 2));
   } else {
     console.log(`\nDone! Restart your editor to pick up filestash.`);
+    console.log(`\nAvailable MCP tools:`);
+    console.log(`  read_file        Read a file, returning only a diff if unchanged since last read`);
+    console.log(`  read_files       Batch read multiple files at once`);
+    console.log(`  stash_status     Show files tracked and tokens saved`);
+    console.log(`  stash_clear      Reset the stash (re-sends full file contents on next read)`);
+    console.log(`\nStash location: FILESTASH_DIR env var (default: .file-stash in cwd)`);
   }
 }
 
 function runHelp(): void {
-  console.log(`filestash - Agent file stash with diff tracking
+  console.log(`agent-file-stash - Agent file stash with diff tracking
 
 Usage:
-  filestash init      Auto-configure filestash for your editor
-  filestash serve     Start the MCP server (default)
-  filestash status    Show stash statistics
-  filestash help      Show this help message
+  agent-file-stash init      Auto-configure for your editor
+  agent-file-stash serve     Start the MCP server (default)
+  agent-file-stash status    Show stash statistics
+  agent-file-stash help      Show this help message
 
 Environment:
   FILESTASH_DIR       Stash directory (default: .file-stash)`);
