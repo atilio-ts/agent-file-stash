@@ -274,3 +274,33 @@ WAL mode is enabled so concurrent reads never block each other and reads never b
 **Diff algorithm:** Line-based unified diff (`computeDiff`). Groups changed lines into hunks with context lines, identical to the output of `git diff`. Diffs are stored as strings and returned verbatim to the agent.
 
 **Token estimation:** `ceil(characters / 4)`. Rough but directionally correct for code. Used only for the "tokens saved" metric — never affects correctness.
+
+## Uninstall
+
+**1. Remove from editor configs**
+
+Remove the `agent-file-stash` entry from each config file where `init` added it:
+
+| Editor | Config file |
+|--------|-------------|
+| Claude Code | `~/.claude.json` |
+| Cursor | `~/.cursor/mcp.json` |
+| OpenCode | `$XDG_CONFIG_HOME/opencode/opencode.json` |
+
+Delete the `"agent-file-stash"` key from the `mcpServers` object in each file, then restart your editor.
+
+**2. Remove the stash database**
+
+```bash
+rm -rf .file-stash/
+```
+
+This deletes the SQLite database and all cached content. If you set a custom `FILESTASH_DIR`, remove that directory instead.
+
+**3. Remove the package** _(if installed globally)_
+
+```bash
+npm uninstall -g agent-file-stash
+```
+
+If you only used it via `npx`, no package removal is needed — npx caches are managed by npm automatically.
