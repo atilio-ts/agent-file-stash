@@ -1,6 +1,6 @@
 {
   "name": "agent-file-stash",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "mcpName": "io.github.atilio-ts/agent-file-stash",
   "description": "File stash with diff tracking for AI coding agents. Drop-in replacement for file reads that saves tokens.",
   "type": "module",
