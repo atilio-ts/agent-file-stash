@@ -2,40 +2,11 @@
   <img src="logo.svg" alt="agent-file-stash" width="200" />
 </p>
 
-# agent-file-stash
-
-> File stash with diff tracking for AI coding agents. Drop-in replacement for file reads that cuts token usage in half.
-
-[![npm version](https://img.shields.io/npm/v/agent-file-stash)](https://www.npmjs.com/package/agent-file-stash)
-[![Node.js >=24](https://img.shields.io/badge/node-%3E%3D24-brightgreen)](https://nodejs.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
-
-## Highlights
-
-- **50% fewer tokens** on repeated file reads — verified on real codebases
-- **Zero config** — one command auto-configures Claude Code, Cursor, and OpenCode
-- **No external services** — SQLite backed by Node.js 24 built-ins, no network required
-- **Partial-read aware** — stashes line ranges independently; returns `[unchanged in lines 50-59]` when only other parts changed
-- **Agents adopt it on their own** — tool descriptions alone are enough; no explicit instructions needed
-
-## Table of Contents
-
-- [How it works](#how-it-works)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [As an MCP server](#as-an-mcp-server-recommended)
-  - [As a CLI](#as-a-cli)
-  - [As an SDK](#as-an-sdk)
-- [Benchmark](#benchmark)
-- [Project Structure](#project-structure)
-- [Architecture](#architecture)
-- [FAQ](#faq)
-- [License](#license)
-
-## How it works
+# Agent-File-Stash
 
 Agents waste most of their token budget re-reading files they've already seen. agent-file-stash fixes this: on first read it stashes the file, on subsequent reads it returns either "unchanged" (one line instead of the whole file) or a compact diff of what changed.
+
+agent-file-stash is based on [cachebro](https://github.com/glommer/cachebro), an earlier tool with the same goal. cachebro required [Turso](https://turso.tech) as an external database dependency and lacked per-line-range stashing, meaning partial reads always returned the full file. agent-file-stash replaces Turso with `node:sqlite` — a built-in available since Node.js 24 — eliminating all external runtime dependencies. It also tracks partial reads independently by line range, so a re-read of lines 50–60 returns `[unchanged]` even if line 200 was edited. Additional improvements include a `readFileFull` method to force a full re-read and reset session tracking, proactive cache eviction when files are deleted via an optional file watcher, and a more accurate token estimate (`ceil(chars / 4)` vs the original `chars * 0.75`).
 
 ```
 First read:   agent reads src/auth.ts → stashes content + hash → returns full file
@@ -46,6 +17,13 @@ Partial read: agent reads lines 50-60 → edit changed line 200 → returns "[un
 
 The stash persists in a local SQLite database (Node.js built-in `node:sqlite`, WAL mode). Content hashing (SHA-256) detects changes. No network, no external services, no configuration beyond a file path.
 
+## Highlights
+
+- **50% fewer tokens** on repeated file reads — verified on real codebases
+- **Zero config** — one command auto-configures Claude Code, Cursor, and OpenCode
+- **No external services** — SQLite backed by Node.js 24 built-ins, no network required
+- **Partial-read aware** — stashes line ranges independently; returns `[unchanged in lines 50-59]` when only other parts changed
+- **Agents adopt it on their own** — tool descriptions alone are enough; no explicit instructions needed
 ## Prerequisites
 
 - **Node.js 24 or later** — agent-file-stash uses `node:sqlite`, a built-in module available from Node.js 24
@@ -86,12 +64,61 @@ The MCP server exposes 4 tools that agents discover and use automatically:
 
 ### As a CLI
 
+#### `init`
+
 ```bash
-agent-file-stash init       # Auto-configure for Claude Code, Cursor, OpenCode
-agent-file-stash serve      # Start the MCP server (default when no command given)
-agent-file-stash status     # Show stash statistics
-agent-file-stash help       # Show help
+npx agent-file-stash init
 ```
+
+Detects installed editors and writes the MCP server entry into each config file it finds:
+
+| Editor | Config file |
+|--------|-------------|
+| Claude Code | `~/.claude.json` |
+| Cursor | `~/.cursor/mcp.json` |
+| OpenCode | `$XDG_CONFIG_HOME/opencode/opencode.json` |
+
+If the `agent-file-stash` key already exists in a config, that entry is left unchanged and reported as "already configured". After running, restart your editor to pick up the new server.
+
+```
+  Claude Code: configured (/Users/you/.claude.json)
+  OpenCode: already configured
+
+Done! Restart your editor to pick up filestash.
+```
+
+#### `serve`
+
+```bash
+npx agent-file-stash serve
+# or just: npx agent-file-stash
+```
+
+Starts the MCP server over stdio. This is the command editors invoke automatically — you don't normally run it yourself. The server registers four tools (`read_file`, `read_files`, `stash_status`, `stash_clear`) and keeps the stash database open for the lifetime of the process.
+
+The stash database is created at `$FILESTASH_DIR/stash.db` (defaults to `.file-stash/stash.db` relative to the working directory the editor uses when launching the server).
+
+#### `status`
+
+```bash
+npx agent-file-stash status
+```
+
+Prints lifetime stats from the local stash database. Exits with a message if no database exists yet.
+
+```
+filestash status:
+  Files tracked:          12
+  Tokens saved (total):   ~53,851
+```
+
+#### `help`
+
+```bash
+npx agent-file-stash help
+```
+
+Prints a short usage summary with all available commands.
 
 **Environment variables:**
 
@@ -236,34 +263,14 @@ The SDK has no external dependencies — it uses only Node.js built-ins (`node:s
 | `stats` | Global token-savings counter |
 | `session_stats` | Per-session token-savings counter |
 
-Multiple sessions and branch switches are handled correctly — each session independently tracks which file version it last read, so switching branches or running multiple agents in parallel produces correct diffs for each.
+`file_versions` is content-addressed: each row is a unique `(path, hash)` pair storing the full file content and its diff relative to the previous version at that path. When a file is read, its current content is hashed. If a matching row exists, no write occurs — the read is free. If the hash is new, a new row is inserted and the diff is computed and stored alongside it.
+
+`session_reads` is a lightweight pointer table. Each row is a `(sessionId, path, hash)` triple recording which version of a file a given session last saw. On re-read, the engine joins `session_reads` against `file_versions` to decide what to return: same hash → `[unchanged]` label; different hash → stored diff; no prior entry → full content. This means two agents running in parallel, or an agent reading across a branch switch, each get correct diffs scoped to their own session.
+
+WAL mode is enabled so concurrent reads never block each other and reads never block writes — important when multiple MCP tool calls fire in quick succession.
 
 **Change detection:** On every read, the current file content is hashed (SHA-256, truncated to 16 hex chars). Same hash = unchanged. Different hash = compute diff, update stash. No polling or watchers required for correctness — the hash is the source of truth. File watchers are optional and only used to proactively evict deleted files.
 
 **Diff algorithm:** Line-based unified diff (`computeDiff`). Groups changed lines into hunks with context lines, identical to the output of `git diff`. Diffs are stored as strings and returned verbatim to the agent.
 
 **Token estimation:** `ceil(characters / 4)`. Rough but directionally correct for code. Used only for the "tokens saved" metric — never affects correctness.
-
-## FAQ
-
-**Does it work with agents other than Claude?**
-Yes. agent-file-stash is an MCP server — any MCP-compatible agent (Cursor, OpenCode, etc.) can use it.
-
-**Where is the stash database stored?**
-By default in `.file-stash/stash.db` inside the current working directory. Set `FILESTASH_DIR` to change this.
-
-**Is the stash shared across sessions?**
-File content is shared (content-addressed, so identical files are stored once). Read state is tracked per `sessionId` — each session independently knows which file version it last saw, so two agents running in parallel get correct diffs independently.
-
-**What happens when I switch git branches?**
-agent-file-stash detects the new file content via hashing and returns a diff automatically on the next read. No manual reset needed.
-
-**Does clearing the stash affect my source files?**
-No. `stash_clear` (or `stash.clear()`) only removes the stash database contents. Your source files are never modified.
-
-**What Node.js version do I need?**
-Node.js 24 or later. The `node:sqlite` module was stabilized in Node.js 24.
-
-## License
-
-[MIT](./LICENSE)
