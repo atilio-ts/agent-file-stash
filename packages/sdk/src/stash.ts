@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS session_reads (
   PRIMARY KEY (session_id, path)
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+  session_id  TEXT PRIMARY KEY,
+  pid         INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS stats (
   key   TEXT PRIMARY KEY,
   value INTEGER NOT NULL DEFAULT 0
@@ -61,6 +66,16 @@ function contentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, HASH_LENGTH);
 }
 
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 function queryOne<T>(db: DatabaseSync, sql: string, params: (string | number)[] = []): T | undefined {
   const rows = db.prepare(sql).all(...params) as T[];
   return rows[0];
@@ -82,8 +97,36 @@ export class StashStore {
     const { DatabaseSync } = await import("node:sqlite");
     this.db = new DatabaseSync(this.dbPath);
     this.db.exec("PRAGMA journal_mode=WAL");
+    this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec(SCHEMA);
+    this.registerSession(this.db);
+    this.pruneClosedSessions(this.db);
     this.initialized = true;
+  }
+
+  private registerSession(db: DatabaseSync): void {
+    db.prepare("INSERT OR REPLACE INTO sessions (session_id, pid) VALUES (?, ?)").run(this.sessionId, process.pid);
+  }
+
+  private pruneClosedSessions(db: DatabaseSync): void {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const sessions = db.prepare("SELECT session_id, pid FROM sessions").all() as { session_id: string; pid: number }[];
+      for (const s of sessions) {
+        if (s.session_id !== this.sessionId && !isProcessAlive(s.pid)) {
+          db.prepare("DELETE FROM sessions WHERE session_id = ?").run(s.session_id);
+        }
+      }
+      db.exec("DELETE FROM session_reads WHERE session_id NOT IN (SELECT session_id FROM sessions)");
+      db.exec("DELETE FROM session_stats WHERE session_id NOT IN (SELECT session_id FROM sessions)");
+      db.exec(
+        "DELETE FROM file_versions WHERE NOT EXISTS (SELECT 1 FROM session_reads r WHERE r.path = file_versions.path AND r.hash = file_versions.hash)"
+      );
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   private getDb(): DatabaseSync {
@@ -300,6 +343,7 @@ export class StashStore {
 
   async close(): Promise<void> {
     if (this.db) {
+      this.db.prepare("DELETE FROM sessions WHERE session_id = ?").run(this.sessionId);
       this.db.close();
       this.db = null;
       this.initialized = false;
