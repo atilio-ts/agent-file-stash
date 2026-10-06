@@ -112,6 +112,22 @@ filestash status:
   Tokens saved (total):   ~53,851
 ```
 
+When each project keeps its own stash (for example with `FILESTASH_DIR=.vscode/file-stash`), sum all of them with `--all`. It scans the given directory (default: home) for `.file-stash/` and `file-stash/` folders:
+
+```bash
+npx agent-file-stash status --all ~/Projects
+```
+
+```
+filestash status (3 databases under /Users/me/Projects):
+  ~   252,340 tokens    112 files  /Users/me/Projects/api
+  ~    45,157 tokens    128 files  /Users/me/Projects/web
+  ~     7,043 tokens     18 files  /Users/me/Projects/legacy
+  ~   304,540 tokens    258 files  TOTAL
+```
+
+Savings come from re-reads within a session (unchanged files and diffs). A new session always receives full content, since the file is not in its context yet.
+
 #### `help`
 
 ```bash

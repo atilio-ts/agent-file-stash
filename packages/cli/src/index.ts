@@ -3,6 +3,7 @@ import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { startMcpServer } from "./mcp.js";
+import { findStashDatabases } from "./scan.js";
 
 // Suppress the node:sqlite experimental warning before sqlite is dynamically loaded
 const _origEmitWarning = process.emitWarning;
@@ -31,6 +32,39 @@ async function runStatus(): Promise<void> {
   console.log(`  Tokens saved (total):   ~${stats.tokensSaved.toLocaleString()}`);
 
   await stash.close();
+}
+
+async function runStatusAll(root: string): Promise<void> {
+  const databases = findStashDatabases(resolve(root));
+  if (databases.length === 0) {
+    console.log(`No filestash databases found under ${resolve(root)}.`);
+    return;
+  }
+
+  const rows: { project: string; files: number; tokens: number }[] = [];
+  for (const dbPath of databases) {
+    const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION });
+    try {
+      await stash.init();
+      const stats = await stash.getStats();
+      rows.push({ project: resolve(dbPath, "../..").replace(/\/\.vscode$/, ""), files: stats.filesTracked, tokens: stats.tokensSaved });
+    } catch (e: unknown) {
+      console.error(`  skipped ${dbPath}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      await stash.close();
+    }
+  }
+
+  rows.sort((a, b) => b.tokens - a.tokens);
+  const totalTokens = rows.reduce((sum, r) => sum + r.tokens, 0);
+  const totalFiles = rows.reduce((sum, r) => sum + r.files, 0);
+
+  console.log(`filestash status (${rows.length} databases under ${resolve(root)}):`);
+  for (const r of rows) {
+    console.log(`  ~${r.tokens.toLocaleString().padStart(10)} tokens  ${String(r.files).padStart(5)} files  ${r.project}`);
+  }
+  console.log(`  ~${totalTokens.toLocaleString().padStart(10)} tokens  ${String(totalFiles).padStart(5)} files  TOTAL`);
+  console.log(`\nSavings count re-reads within a session (unchanged files and diffs); a new session always receives full content.`);
 }
 
 async function runInit(): Promise<void> {
@@ -118,6 +152,8 @@ Usage:
   agent-file-stash init      Auto-configure for your editor
   agent-file-stash serve     Start the MCP server (default)
   agent-file-stash status    Show stash statistics
+  agent-file-stash status --all [dir]
+                             Sum statistics of every stash under dir (default: home)
   agent-file-stash help      Show this help message
 
 Environment:
@@ -128,6 +164,8 @@ const command = process.argv[2];
 
 if (!command || command === "serve") {
   await startMcpServer();
+} else if (command === "status" && process.argv[3] === "--all") {
+  await runStatusAll(process.argv[4] ?? homedir());
 } else if (command === "status") {
   await runStatus();
 } else if (command === "init") {
