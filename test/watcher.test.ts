@@ -16,6 +16,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function waitUntilWatching(stash: StashStore): Promise<void> {
+  const probe = join(TEST_DIR, "probe.ts");
+  await vi.waitFor(
+    () => {
+      writeFileSync(probe, "");
+      rmSync(probe);
+      expect(stash.onFileDeleted).toHaveBeenCalledWith(probe);
+    },
+    { timeout: 3000, interval: 150 },
+  );
+}
+
 beforeAll(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
   mkdirSync(TEST_DIR, { recursive: true });
@@ -33,6 +45,7 @@ describe("FileWatcher", () => {
     const stash = makeMockStash();
     const watcher = new FileWatcher(stash, 20);
     watcher.watch([TEST_DIR]);
+    await waitUntilWatching(stash);
 
     rmSync(filePath);
     await sleep(120); // debounce(20) + buffer
@@ -48,6 +61,7 @@ describe("FileWatcher", () => {
     const stash = makeMockStash();
     const watcher = new FileWatcher(stash, 80);
     watcher.watch([TEST_DIR]);
+    await waitUntilWatching(stash);
 
     // Rapid create/delete cycles on same path generate multiple fs events
     // all within the debounce window — should collapse to one handleChange call
@@ -59,8 +73,8 @@ describe("FileWatcher", () => {
 
     await sleep(250); // debounce(80) + generous buffer
 
-    expect(stash.onFileDeleted).toHaveBeenCalledTimes(1);
-    expect(stash.onFileDeleted).toHaveBeenCalledWith(filePath);
+    const calls = vi.mocked(stash.onFileDeleted).mock.calls.filter(([p]) => p === filePath);
+    expect(calls).toHaveLength(1);
     watcher.close();
   });
 
