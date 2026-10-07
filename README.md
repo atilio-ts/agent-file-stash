@@ -151,6 +151,17 @@ Prints a short usage summary with all available commands.
 | Variable | Default | Description |
 |---|---|---|
 | `FILESTASH_DIR` | `.file-stash/` | Directory where the stash database is stored |
+| `FILESTASH_EXCLUDE` | (none) | Comma-separated basename globs (`*`, `?`) that are never stored, added to the defaults |
+
+### Privacy
+
+Files that commonly hold secrets are read normally but never written to the stash database. The agent still gets the full content on every read; nothing is persisted, and no tokens are counted as saved for them.
+
+Excluded by default (case-insensitive): `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `.npmrc`, `.netrc`, `credentials*`, `secrets.*`, and anything inside a `.ssh`, `.aws` or `.gnupg` directory. Templates such as `.env.example`, `.env.sample`, `.env.template`, `.env.dist` and public keys (`*.pub`) are still stashed.
+
+Add your own patterns with `FILESTASH_EXCLUDE=*.secret,vault.json` (SDK users: the `exclude` option). On startup, rows for paths that match the denylist are deleted from databases created by older versions. The stash directory is created with mode `0700` and the database files are restricted to `0600`.
+
+Add the stash folder (`.file-stash/` by default) to your `.gitignore`.
 
 ### Context resets
 

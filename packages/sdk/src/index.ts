@@ -1,6 +1,7 @@
 export { StashStore } from "./stash.js";
 export { FileWatcher } from "./watcher.js";
 export { computeDiff } from "./differ.js";
+export { isExcludedPath } from "./exclude.js";
 export type { StashConfig, StashStats, FileReadResult } from "./types.js";
 
 import { StashStore } from "./stash.js";

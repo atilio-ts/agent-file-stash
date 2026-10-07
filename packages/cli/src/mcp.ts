@@ -14,8 +14,15 @@ export function resolveStashDir(baseDir: string = process.cwd()): string {
 
 function getStashDir(): string {
   const dir = resolveStashDir();
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
+}
+
+function parseExcludeEnv(): string[] {
+  return (process.env.FILESTASH_EXCLUDE ?? "")
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
 }
 
 export function isPathAllowed(absPath: string, cwd: string): boolean {
@@ -91,6 +98,7 @@ export async function startMcpServer(): Promise<void> {
     dbPath,
     sessionId,
     watchPaths,
+    exclude: parseExcludeEnv(),
   });
 
   await stash.init();

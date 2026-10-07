@@ -1,8 +1,9 @@
 import type { DatabaseSync } from "node:sqlite";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, chmodSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { computeDiff, type DiffResult } from "./differ.js";
+import { isExcludedPath } from "./exclude.js";
 import type { StashConfig, StashStats, FileReadResult } from "./types.js";
 
 const SCHEMA = `
@@ -85,11 +86,13 @@ export class StashStore {
   private db: DatabaseSync | null = null;
   private readonly dbPath: string;
   private readonly sessionId: string;
+  private readonly exclude: string[];
   private initialized = false;
 
   constructor(config: StashConfig) {
     this.dbPath = config.dbPath;
     this.sessionId = config.sessionId;
+    this.exclude = config.exclude ?? [];
   }
 
   async init(): Promise<void> {
@@ -101,7 +104,18 @@ export class StashStore {
     this.db.exec(SCHEMA);
     this.registerSession(this.db);
     this.pruneClosedSessions(this.db);
+    this.restrictPermissions();
     this.initialized = true;
+  }
+
+  private restrictPermissions(): void {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        chmodSync(this.dbPath + suffix, 0o600);
+      } catch {
+        // missing sibling file or unsupported platform
+      }
+    }
   }
 
   private registerSession(db: DatabaseSync): void {
@@ -111,6 +125,7 @@ export class StashStore {
   private pruneClosedSessions(db: DatabaseSync): void {
     db.exec("BEGIN IMMEDIATE");
     try {
+      this.purgeExcluded(db);
       const sessions = db.prepare("SELECT session_id, pid FROM sessions").all() as { session_id: string; pid: number }[];
       for (const s of sessions) {
         if (s.session_id !== this.sessionId && !isProcessAlive(s.pid)) {
@@ -126,6 +141,15 @@ export class StashStore {
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;
+    }
+  }
+
+  private purgeExcluded(db: DatabaseSync): void {
+    for (const table of ["file_versions", "session_reads"]) {
+      const rows = db.prepare(`SELECT DISTINCT path FROM ${table}`).all() as { path: string }[];
+      for (const { path } of rows) {
+        if (isExcludedPath(path, this.exclude)) db.prepare(`DELETE FROM ${table} WHERE path = ?`).run(path);
+      }
     }
   }
 
@@ -174,6 +198,10 @@ export class StashStore {
       limit,
       now,
     };
+
+    if (isExcludedPath(absPath, this.exclude)) {
+      return { stashed: false, content: this.sliceContent(state), hash: currentHash, totalLines: currentLines };
+    }
 
     const lastRead = queryOne<{ hash: string }>(db,
       "SELECT hash FROM session_reads WHERE session_id = ? AND path = ?",
@@ -302,6 +330,7 @@ export class StashStore {
     const db = this.getDb();
 
     const { absPath, content, hash, lines, now } = this.readFileSnapshot(filePath);
+    if (isExcludedPath(absPath, this.exclude)) return { stashed: false, content, hash, totalLines: lines };
 
     this.storeVersion(db, absPath, hash, content, lines, now);
     db.prepare(

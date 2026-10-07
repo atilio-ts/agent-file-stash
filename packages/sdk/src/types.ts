@@ -5,6 +5,8 @@ export interface StashConfig {
   sessionId: string;
   /** Directories to watch for file changes. Defaults to cwd. */
   watchPaths?: string[];
+  /** Extra basename globs (`*`, `?`) that are never stored, in addition to the built-in secret denylist. */
+  exclude?: string[];
 }
 
 interface FileReadResultBase {
