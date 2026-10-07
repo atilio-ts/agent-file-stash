@@ -8,6 +8,8 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-07
+
 ### Added
 
 - `reset` command that forgets what each session has read, so the next read of every file returns full content. `--from-hook` is a quiet mode for Claude Code hooks.
