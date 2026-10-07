@@ -160,14 +160,15 @@ describe("pruning closed sessions", () => {
   test("an active session can still diff after another session starts", async () => {
     const dbPath = newDbPath();
     const file = join(TEST_DIR, "diffable.ts");
-    writeFileSync(file, "line1\nline2\nline3\n");
+    const padding = "filler\n".repeat(200);
+    writeFileSync(file, `line1\nline2\nline3\n${padding}`);
     const a = open(dbPath, "active-a");
     await a.stash.readFile(file);
 
     const b = open(dbPath, "active-b");
     try {
       await b.stash.init();
-      writeFileSync(file, "line1\nCHANGED\nline3\n");
+      writeFileSync(file, `line1\nCHANGED\nline3\n${padding}`);
       const r = await a.stash.readFile(file);
       expect(r.stashed).toBe(true);
       expect(r.content).toContain("CHANGED");

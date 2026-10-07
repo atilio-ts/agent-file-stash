@@ -257,8 +257,13 @@ export class StashStore {
   }
 
   private handleFullDiff(db: DatabaseSync, s: ReadState, diffResult: DiffResult): FileReadResult {
-    const saved = Math.max(0, estimateTokens(s.currentContent) - estimateTokens(diffResult.diff));
-    this.addTokensSaved(db, saved);
+    const contentTokens = estimateTokens(s.currentContent);
+    const diffTokens = estimateTokens(diffResult.diff);
+    if (diffTokens >= contentTokens) {
+      return { stashed: false, content: s.currentContent, hash: s.currentHash, totalLines: s.currentLines };
+    }
+
+    this.addTokensSaved(db, contentTokens - diffTokens);
 
     return {
       stashed: true,

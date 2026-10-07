@@ -8,6 +8,7 @@ const TEST_DIR = join(import.meta.dirname, ".tmp_test");
 const DB_PATH = join(TEST_DIR, "test.db");
 const FILE_PATH = join(TEST_DIR, "example.ts");
 const LONG_FILE = join(TEST_DIR, "long.ts");
+const PADDING = Array.from({ length: 40 }, (_, i) => `const padding${i} = ${i};`).join("\n");
 
 describe("smoke tests", () => {
   let stash: StashStore;
@@ -18,7 +19,7 @@ describe("smoke tests", () => {
   beforeAll(async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
-    writeFileSync(FILE_PATH, `function hello() {\n  console.log("hello world");\n}\n`);
+    writeFileSync(FILE_PATH, `function hello() {\n  console.log("hello world");\n}\n${PADDING}\n`);
     ({ stash, watcher } = createStash({ dbPath: DB_PATH, sessionId: "test-session-1" }));
     await stash.init();
   });
@@ -46,7 +47,7 @@ describe("smoke tests", () => {
   });
 
   test("modified file returns diff", async () => {
-    writeFileSync(FILE_PATH, `function hello() {\n  console.log("hello filestash!");\n  return true;\n}\n`);
+    writeFileSync(FILE_PATH, `function hello() {\n  console.log("hello filestash!");\n  return true;\n}\n${PADDING}\n`);
     const r = await stash.readFile(FILE_PATH);
     expect(r.stashed).toBe(true);
     if (!r.stashed) throw new Error("expected stashed result");
