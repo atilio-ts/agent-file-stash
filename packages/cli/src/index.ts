@@ -261,7 +261,9 @@ Usage:
 
 Environment:
   FILESTASH_DIR       Stash directory (default: .file-stash)
-  FILESTASH_EXCLUDE   Extra comma-separated file name globs that are never stored`);
+  FILESTASH_EXCLUDE   Extra comma-separated file name globs that are never stored
+  FILESTASH_MAX_LINES Max lines returned per read (default: 2000)
+  FILESTASH_MAX_CHARS Max characters returned per read (default: 100000)`);
 }
 
 const command = process.argv[2];

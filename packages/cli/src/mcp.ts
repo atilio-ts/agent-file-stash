@@ -19,6 +19,20 @@ function parseExcludeEnv(): string[] {
     .filter(Boolean);
 }
 
+function parseLimitEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return undefined;
+  if (/^[1-9]\d*$/.test(raw) && Number.isSafeInteger(Number(raw))) return Number(raw);
+  process.stderr.write(`[filestash] ignoring invalid ${name}=${JSON.stringify(raw)}; using the default\n`);
+  return undefined;
+}
+
+function limitOptions(): { maxLines?: number; maxChars?: number } {
+  const maxLines = parseLimitEnv("FILESTASH_MAX_LINES");
+  const maxChars = parseLimitEnv("FILESTASH_MAX_CHARS");
+  return { ...(maxLines !== undefined && { maxLines }), ...(maxChars !== undefined && { maxChars }) };
+}
+
 export function isPathAllowed(absPath: string, cwd: string): boolean {
   let realPath: string;
   try {
@@ -69,7 +83,7 @@ const readFilesShape = {
 
 export const TOOL_DEFS = {
   read_file: {
-    description: `Read a file (use instead of Read). Repeat reads of an unchanged file return a short label, changed files return only a diff. offset/limit supported, partial reads are stashed too. force=true returns full content (use when the original is no longer in context).`,
+    description: `Read a file (use instead of Read). Repeat reads of an unchanged file return a short label, changed files return only a diff. offset/limit supported and stashed. Long files are truncated, continue with offset. force=true returns full content (use when the original is no longer in context).`,
     inputSchema: readFileShape,
   },
   read_files: {
@@ -189,6 +203,7 @@ export async function startMcpServer(): Promise<void> {
     sessionId,
     watchPaths,
     exclude: parseExcludeEnv(),
+    ...limitOptions(),
   });
 
   await stash.init();

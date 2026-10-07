@@ -65,6 +65,62 @@ interface ReadState {
   offset: number;
   limit: number;
   now: number;
+  size: number;
+  slice: string;
+  midLine: boolean;
+}
+
+export const DEFAULT_MAX_LINES = 2000;
+export const DEFAULT_MAX_CHARS = 100_000;
+export const DEFAULT_MAX_STORE_BYTES = 1_000_000;
+export const HARD_MAX_READ_BYTES = 64 * 1024 * 1024;
+const BINARY_SNIFF_CHARS = 8192;
+
+interface Snapshot {
+  absPath: string;
+  size: number;
+  content: string;
+  hash: string;
+  lines: number;
+  now: number;
+  early?: { result: FileReadResult; countRead: boolean };
+}
+
+interface Slice {
+  text: string;
+  start: number;
+  end: number;
+  midLine: boolean;
+  truncated: boolean;
+}
+
+function positiveOr(value: number | undefined, fallback: number): number {
+  return Number.isInteger(value) && value! > 0 ? value! : fallback;
+}
+
+function sliceLines(content: string, offset: number, limit: number, maxLines: number, maxChars: number): Slice {
+  const lines = content.split("\n");
+  const total = lines.length;
+  const startIdx = offset > 0 ? offset - 1 : 0;
+  const start = startIdx + 1;
+  const requestedEnd = limit > 0 ? Math.min(startIdx + limit, total) : total;
+  const maxEnd = Math.min(requestedEnd, startIdx + maxLines);
+  let chars = 0;
+  let i = startIdx;
+  for (; i < maxEnd; i++) {
+    const next = chars + lines[i]!.length + (i > startIdx ? 1 : 0);
+    if (next > maxChars) break;
+    chars = next;
+  }
+  if (i >= requestedEnd) {
+    return { text: lines.slice(startIdx, i).join("\n"), start, end: limit > 0 ? start + limit - 1 : total, midLine: false, truncated: false };
+  }
+  if (i > startIdx) {
+    const notice = `[filestash: truncated, showing lines ${start}-${i} of ${total}; continue with offset=${i + 1}]`;
+    return { text: `${lines.slice(startIdx, i).join("\n")}\n${notice}`, start, end: i, midLine: false, truncated: true };
+  }
+  const notice = `[filestash: truncated, showing the first ${maxChars} chars of line ${start} of ${total}; continue with offset=${start + 1}]`;
+  return { text: `${lines[startIdx]!.slice(0, maxChars)}\n${notice}`, start, end: start - 1, midLine: true, truncated: true };
 }
 
 function estimateTokens(text: string): number {
@@ -171,6 +227,9 @@ export class StashStore {
   private initialized = false;
   private readonly recoverCorrupt: boolean;
   private readonly quiet: boolean;
+  private readonly maxLines: number;
+  private readonly maxChars: number;
+  private readonly maxStoreBytes: number;
   private recoveryAttempted = false;
   private recoveredFrom: string | undefined;
   private reason: string | undefined;
@@ -181,6 +240,9 @@ export class StashStore {
     this.exclude = config.exclude ?? [];
     this.recoverCorrupt = config.recoverCorrupt ?? true;
     this.quiet = config.quiet ?? false;
+    this.maxLines = positiveOr(config.maxLines, DEFAULT_MAX_LINES);
+    this.maxChars = positiveOr(config.maxChars, DEFAULT_MAX_CHARS);
+    this.maxStoreBytes = positiveOr(config.maxStoreBytes, DEFAULT_MAX_STORE_BYTES);
   }
 
   get isDegraded(): boolean {
@@ -342,44 +404,62 @@ export class StashStore {
     }
   }
 
-  private readFileSnapshot(filePath: string): {
-    absPath: string;
-    content: string;
-    hash: string;
-    lines: number;
-    now: number;
-  } {
+  private readFileSnapshot(filePath: string): Snapshot {
     const absPath = resolve(filePath);
-    statSync(absPath); // throws if file doesn't exist
+    const size = statSync(absPath).size;
+    const now = Date.now();
+    if (size > HARD_MAX_READ_BYTES) {
+      const result: FileReadResult = { stashed: false, content: `[filestash: file too large (${size} bytes); not read]`, hash: "" };
+      return { absPath, size, content: "", hash: "", lines: 0, now, early: { result, countRead: false } };
+    }
     const content = readFileSync(absPath, "utf-8");
-    return {
-      absPath,
-      content,
-      hash: contentHash(content),
-      lines: content.split("\n").length,
-      now: Date.now(),
-    };
+    const hash = contentHash(content);
+    const lines = content.split("\n").length;
+    const snap: Snapshot = { absPath, size, content, hash, lines, now };
+    if (content.slice(0, BINARY_SNIFF_CHARS).includes("\u0000")) {
+      const result: FileReadResult = { stashed: false, content: `[filestash: binary file (${size} bytes), not shown]`, hash, totalLines: lines };
+      snap.early = { result, countRead: true };
+    }
+    return snap;
+  }
+
+  private earlyResult(snap: Snapshot): FileReadResult {
+    const { result, countRead } = snap.early!;
+    if (countRead) {
+      const tokens = estimateTokens(result.content);
+      this.guarded((db) => this.recordRead(db, tokens, tokens));
+    }
+    return result;
+  }
+
+  private isStoreable(snap: { absPath: string; size: number }): boolean {
+    return snap.size <= this.maxStoreBytes && !isExcludedPath(snap.absPath, this.exclude);
   }
 
   async readFile(filePath: string, options?: { offset?: number; limit?: number }): Promise<FileReadResult> {
     await this.init();
 
-    const { absPath, content: currentContent, hash: currentHash, lines: currentLines, now } = this.readFileSnapshot(filePath);
+    const snap = this.readFileSnapshot(filePath);
+    if (snap.early) return this.earlyResult(snap);
+    const { absPath, content: currentContent, hash: currentHash, lines: currentLines, now } = snap;
     const offset = options?.offset ?? 0;
     const limit = options?.limit ?? 0;
-    const rangeStart = offset > 0 ? offset : 1;
+    const slice = sliceLines(currentContent, offset, limit, this.maxLines, this.maxChars);
 
     const state: ReadState = {
       absPath,
       currentContent,
       currentHash,
       currentLines,
-      isPartial: offset > 0 || limit > 0,
-      rangeStart,
-      rangeEnd: limit > 0 ? rangeStart + limit - 1 : currentLines,
+      isPartial: offset > 0 || limit > 0 || slice.truncated,
+      rangeStart: slice.start,
+      rangeEnd: slice.end,
       offset,
       limit,
       now,
+      size: snap.size,
+      slice: slice.text,
+      midLine: slice.midLine,
     };
 
     if (this.db) {
@@ -393,12 +473,12 @@ export class StashStore {
   }
 
   private plainResult(s: ReadState): FileReadResult {
-    return { stashed: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+    return { stashed: false, content: s.slice, hash: s.currentHash, totalLines: s.currentLines };
   }
 
   private readWithDb(db: DatabaseSync, state: ReadState): FileReadResult {
-    if (isExcludedPath(state.absPath, this.exclude)) {
-      const content = this.sliceContent(state);
+    if (!this.isStoreable(state)) {
+      const content = state.slice;
       this.recordRead(db, estimateTokens(content), estimateTokens(content));
       return { stashed: false, content, hash: state.currentHash, totalLines: state.currentLines };
     }
@@ -468,14 +548,14 @@ export class StashStore {
   }
 
   private fullSlice(db: DatabaseSync, s: ReadState): FileReadResult {
-    const content = this.sliceContent(s);
+    const content = s.slice;
     this.addRange(db, s.absPath, s.currentHash, s.rangeStart, this.requestedEnd(s));
     this.recordRead(db, estimateTokens(content), estimateTokens(content));
     return { stashed: false, content, hash: s.currentHash, totalLines: s.currentLines };
   }
 
   private unchangedLabel(db: DatabaseSync, s: ReadState, label: (savedTokens: number) => string): FileReadResult {
-    const content = this.sliceContent(s);
+    const content = s.slice;
     const baseline = estimateTokens(content);
     const saved = Math.max(0, baseline - estimateTokens(label(baseline)));
     const text = label(saved);
@@ -530,7 +610,7 @@ export class StashStore {
   }
 
   private handlePartialDiff(db: DatabaseSync, s: ReadState, diffResult: DiffResult): FileReadResult {
-    if (!this.rangeHasChanges(diffResult.changedNewLines, s.rangeStart, s.rangeEnd)) {
+    if (!s.midLine && !this.rangeHasChanges(diffResult.changedNewLines, s.rangeStart, s.rangeEnd)) {
       return this.unchangedLabel(db, s, (tokens) =>
         `[filestash: unchanged in lines ${s.rangeStart}-${s.rangeEnd}, changes elsewhere in file, ${tokens} tokens saved]`,
       );
@@ -557,14 +637,6 @@ export class StashStore {
     };
   }
 
-  private sliceContent(s: ReadState): string {
-    if (!s.isPartial) return s.currentContent;
-    const lines = s.currentContent.split("\n");
-    const start = s.offset > 0 ? s.offset - 1 : 0;
-    const end = s.limit > 0 ? start + s.limit : lines.length;
-    return lines.slice(start, end).join("\n");
-  }
-
   private rangeHasChanges(changedLines: Set<number>, rangeStart: number, rangeEnd: number): boolean {
     for (let l = rangeStart; l <= rangeEnd; l++) {
       if (changedLines.has(l)) return true;
@@ -578,23 +650,26 @@ export class StashStore {
     ).run(absPath, hash, content, lines, now);
   }
 
-  // Always returns full content and resets session tracking. Counts as a plain read (baseline equals sent).
+  // Resets session tracking for the file and returns the first slice regardless of what was delivered before. Counts as a plain read (baseline equals sent).
   async readFileFull(filePath: string): Promise<FileReadResult> {
     await this.init();
 
-    const { absPath, content, hash, lines, now } = this.readFileSnapshot(filePath);
-    const result: FileReadResult = { stashed: false, content, hash, totalLines: lines };
+    const snap = this.readFileSnapshot(filePath);
+    if (snap.early) return this.earlyResult(snap);
+    const { absPath, content, hash, lines, now } = snap;
+    const slice = sliceLines(content, 0, 0, this.maxLines, this.maxChars);
+    const result: FileReadResult = { stashed: false, content: slice.text, hash, totalLines: lines };
     if (!this.db) return result;
 
     try {
-      const tokens = estimateTokens(content);
-      if (!isExcludedPath(absPath, this.exclude)) {
+      const tokens = estimateTokens(slice.text);
+      if (this.isStoreable(snap)) {
         this.storeVersion(this.db, absPath, hash, content, lines, now);
         this.db.prepare(
           "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
         ).run(this.sessionId, absPath, hash, now);
         this.clearRanges(this.db, absPath);
-        this.addRange(this.db, absPath, hash, 1, lines);
+        this.addRange(this.db, absPath, hash, slice.start, slice.end);
       }
       this.recordRead(this.db, tokens, tokens);
     } catch (err) {

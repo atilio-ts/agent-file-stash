@@ -11,6 +11,12 @@ export interface StashConfig {
   recoverCorrupt?: boolean;
   /** Do not write recovery or degraded-mode notices to stderr. */
   quiet?: boolean;
+  /** Maximum lines returned by one read. Defaults to 2000. */
+  maxLines?: number;
+  /** Maximum characters returned by one read. Defaults to 100000. */
+  maxChars?: number;
+  /** Files larger than this many bytes are served capped and never stored. Defaults to 1000000. */
+  maxStoreBytes?: number;
 }
 
 interface FileReadResultBase {

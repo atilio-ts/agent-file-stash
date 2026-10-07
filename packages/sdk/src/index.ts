@@ -1,4 +1,10 @@
-export { StashStore } from "./stash.js";
+export {
+  StashStore,
+  DEFAULT_MAX_LINES,
+  DEFAULT_MAX_CHARS,
+  DEFAULT_MAX_STORE_BYTES,
+  HARD_MAX_READ_BYTES,
+} from "./stash.js";
 export { FileWatcher } from "./watcher.js";
 export { computeDiff } from "./differ.js";
 export { isExcludedPath } from "./exclude.js";

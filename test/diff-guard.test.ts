@@ -15,9 +15,9 @@ afterAll(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
-function setup() {
+function setup(extra: { maxLines?: number; maxChars?: number } = {}) {
   const id = ++counter;
-  const { stash, watcher } = createStash({ dbPath: join(TEST_DIR, `t${id}.db`), sessionId: `s${id}` });
+  const { stash, watcher } = createStash({ dbPath: join(TEST_DIR, `t${id}.db`), sessionId: `s${id}`, ...extra });
   const file = join(TEST_DIR, `f${id}.txt`);
   const close = async () => {
     watcher.close();
@@ -34,7 +34,7 @@ function numberedLines(n: number, edits: number[] = []): string {
 
 describe("diff size guard", () => {
   test("file above the LCS limit with scattered edits returns full content", async () => {
-    const { stash, file, close } = setup();
+    const { stash, file, close } = setup({ maxLines: 100_000, maxChars: 10_000_000 });
     try {
       writeFileSync(file, numberedLines(6000));
       await stash.readFile(file);

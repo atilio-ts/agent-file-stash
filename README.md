@@ -156,6 +156,8 @@ Prints a short usage summary with all available commands.
 |---|---|---|
 | `FILESTASH_DIR` | `.file-stash/` | Directory where the stash database is stored |
 | `FILESTASH_EXCLUDE` | (none) | Comma-separated basename globs (`*`, `?`) that are never stored, added to the defaults |
+| `FILESTASH_MAX_LINES` | `2000` | Maximum lines returned by one read; longer reads are truncated |
+| `FILESTASH_MAX_CHARS` | `100000` | Maximum characters returned by one read; longer reads are truncated |
 
 ### Privacy
 
@@ -166,6 +168,15 @@ Excluded by default (case-insensitive): `.env`, `.env.*`, `*.pem`, `*.key`, `*.p
 Add your own patterns with `FILESTASH_EXCLUDE=*.secret,vault.json` (SDK users: the `exclude` option). On startup, rows for paths that match the denylist are deleted from databases created by older versions. The stash directory is created with mode `0700` and the database files are restricted to `0600`.
 
 Add the stash folder (`.file-stash/` by default) to your `.gitignore`.
+
+### Read limits
+
+A single read never returns more than `FILESTASH_MAX_LINES` lines (default 2000) or `FILESTASH_MAX_CHARS` characters (default 100000), whichever is hit first, so one huge file cannot flood the context. The cap applies to every read: normal, `force`, partial `offset`/`limit` (a larger `limit` is capped too), excluded files, degraded mode and each file of `read_files`. Values must be positive integers; anything else is ignored with one line on stderr and the default is used. SDK users: the `maxLines` and `maxChars` options.
+
+A truncated read ends with `[filestash: truncated, showing lines A-B of N; continue with offset=B+1]`. The cut is made at a line boundary; a single line longer than the character cap is cut at the cap and the notice names the next line to continue from (the rest of that line is not reachable). Only the delivered lines `A-B` count as delivered, so the continuation read returns real content, and repeating the same capped read can be answered `unchanged`. Token accounting uses the capped text (notice included) as the plain-read baseline, so truncation never shows up as savings.
+
+- **Binary files:** if the first 8192 characters contain a NUL byte the file is treated as binary and the read returns `[filestash: binary file (<bytes> bytes), not shown]`. Nothing is stored. The check only looks at the start of the file: a text-looking file with a NUL after 8 KB is not detected and is read as text.
+- **Large files:** files over 1,000,000 bytes (SDK option `maxStoreBytes`) are served capped like any other read but never stored, so they produce no savings. Files over 64 MiB are not read at all and return `[filestash: file too large (<bytes> bytes); not read]`.
 
 ### Context resets
 
