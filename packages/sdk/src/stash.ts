@@ -341,6 +341,11 @@ export class StashStore {
     db.prepare("UPDATE stats SET value = 0").run();
   }
 
+  async resetReads(): Promise<void> {
+    await this.init();
+    this.getDb().prepare("DELETE FROM session_reads").run();
+  }
+
   async close(): Promise<void> {
     if (this.db) {
       this.db.prepare("DELETE FROM sessions WHERE session_id = ?").run(this.sessionId);

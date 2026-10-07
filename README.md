@@ -87,6 +87,8 @@ If the `agent-file-stash` key already exists in a config, that entry is left unc
 Done! Restart your editor to pick up filestash.
 ```
 
+`init --hooks` also merges the context-reset hook (see [Context resets](#context-resets)) into `~/.claude/settings.json`. It is idempotent, keeps all existing settings, and saves the previous file as `settings.json.bak`. Without the flag, `init` only prints the snippet.
+
 #### `serve`
 
 ```bash
@@ -128,6 +130,14 @@ filestash status (3 databases under /Users/me/Projects):
 
 Savings come from re-reads within a session (unchanged files and diffs). A new session always receives full content, since the file is not in its context yet.
 
+#### `reset`
+
+```bash
+npx agent-file-stash reset
+```
+
+Forgets what each session has read, so the next read of every file returns the full content. Stats and stashed versions are kept. It resolves `FILESTASH_DIR` like the server does and exits 0 if no database exists. Meant to be run by a Claude Code hook (see [Context resets](#context-resets)); `--from-hook` reads the hook JSON from stdin, resolves a relative `FILESTASH_DIR` against its `cwd`, and stays silent.
+
 #### `help`
 
 ```bash
@@ -141,6 +151,25 @@ Prints a short usage summary with all available commands.
 | Variable | Default | Description |
 |---|---|---|
 | `FILESTASH_DIR` | `.file-stash/` | Directory where the stash database is stored |
+
+### Context resets
+
+The server answers a repeat read of an unchanged file with a short "unchanged" note, assuming the model still has the content. After `/clear` or `/compact` it does not, and the server has no way to notice. Run `reset` on those events with a Claude Code `SessionStart` hook (`npx agent-file-stash init --hooks` adds it, or paste it into `~/.claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "clear|compact",
+        "hooks": [{ "type": "command", "command": "npx agent-file-stash reset --from-hook" }]
+      }
+    ]
+  }
+}
+```
+
+Limitation: subagents that use the MCP server by name share the parent's server process, so they share its read tracking. A subagent can be told "unchanged" for a file only the parent has seen; have it pass `force=true` on its first read of each file.
 
 ### As an SDK
 
@@ -204,6 +233,7 @@ await stash.close();
 | `stash.readFileFull(path)` | Always return full content and reset session tracking for this file |
 | `stash.getStats()` | Return `{ filesTracked, tokensSaved, sessionTokensSaved }` |
 | `stash.clear()` | Wipe all stashed content and stats |
+| `stash.resetReads()` | Forget read tracking for all sessions; next reads return full content |
 | `stash.close()` | Close the database connection |
 
 ## Benchmark
@@ -253,7 +283,7 @@ packages/
 │   └── types.ts      StashConfig, FileReadResult, StashStats type definitions
 │
 └── cli/src/
-    ├── index.ts      CLI entry point — init, serve, status, help commands
+    ├── index.ts      CLI entry point — init, serve, status, reset, help commands
     └── mcp.ts        MCP server — registers read_file, read_files, stash_status, stash_clear tools
 
 test/

@@ -6,10 +6,14 @@ import { resolve, join, relative, isAbsolute } from "node:path";
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
-function getStashDir(): string {
+export function resolveStashDir(baseDir: string = process.cwd()): string {
   const raw = process.env.FILESTASH_DIR ?? ".file-stash";
   if (raw.includes("\0")) throw new Error("FILESTASH_DIR contains invalid characters");
-  const dir = resolve(raw);
+  return resolve(baseDir, raw);
+}
+
+function getStashDir(): string {
+  const dir = resolveStashDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return dir;
 }

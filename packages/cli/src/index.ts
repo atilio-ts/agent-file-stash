@@ -1,8 +1,8 @@
 import { createStash } from "filestash-sdk";
 import { resolve, join } from "node:path";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { startMcpServer } from "./mcp.js";
+import { startMcpServer, resolveStashDir } from "./mcp.js";
 import { findStashDatabases } from "./scan.js";
 
 // Suppress the node:sqlite experimental warning before sqlite is dynamically loaded
@@ -13,6 +13,82 @@ const _origEmitWarning = process.emitWarning;
 };
 
 const CLI_STATUS_SESSION = "cli-status";
+const RESET_HOOK_COMMAND = "npx agent-file-stash reset --from-hook";
+const RESET_HOOK_ENTRY = {
+  matcher: "clear|compact",
+  hooks: [{ type: "command", command: RESET_HOOK_COMMAND }],
+};
+const HOOK_STDIN_TIMEOUT_MS = 1000;
+
+async function readHookCwd(): Promise<string | undefined> {
+  if (process.stdin.isTTY) return undefined;
+  const read = (async () => {
+    let raw = "";
+    for await (const chunk of process.stdin) raw += chunk;
+    return raw;
+  })();
+  const timeout = new Promise<string>((res) => setTimeout(() => res(""), HOOK_STDIN_TIMEOUT_MS).unref());
+  const raw = (await Promise.race([read, timeout])).trim();
+  if (!raw) return undefined;
+  try {
+    const cwd = (JSON.parse(raw) as { cwd?: unknown })?.cwd;
+    return typeof cwd === "string" && cwd !== "" ? cwd : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function runReset(fromHook: boolean): Promise<void> {
+  try {
+    const hookCwd = fromHook ? await readHookCwd() : undefined;
+    const dbPath = join(resolveStashDir(hookCwd), "stash.db");
+    if (!existsSync(dbPath)) {
+      if (!fromHook) console.log("No filestash database found. Nothing to reset.");
+      return;
+    }
+    const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION });
+    try {
+      await stash.resetReads();
+    } finally {
+      await stash.close();
+    }
+    if (!fromHook) console.log("Read tracking reset. The next read of each file returns full content.");
+  } catch (e: unknown) {
+    console.error(`filestash reset failed: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(fromHook ? 0 : 1);
+  }
+}
+
+function hooksSnippet(): string {
+  return JSON.stringify({ hooks: { SessionStart: [RESET_HOOK_ENTRY] } }, null, 2);
+}
+
+function installClaudeHook(home: string): void {
+  const settingsPath = join(home, ".claude", "settings.json");
+  let settings: Record<string, unknown> = {};
+  const existed = existsSync(settingsPath);
+  if (existed) {
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    } catch {
+      console.error(`  Claude Code hook: ${settingsPath} is not valid JSON, left untouched`);
+      return;
+    }
+  }
+
+  const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
+  const sessionStart = Array.isArray(hooks.SessionStart) ? (hooks.SessionStart as { hooks?: { command?: string }[] }[]) : [];
+  if (sessionStart.some((e) => e?.hooks?.some((h) => h?.command === RESET_HOOK_COMMAND))) {
+    console.log("  Claude Code hook: already configured");
+    return;
+  }
+
+  if (existed) copyFileSync(settingsPath, `${settingsPath}.bak`);
+  else mkdirSync(join(home, ".claude"), { recursive: true });
+  settings.hooks = { ...hooks, SessionStart: [...sessionStart, RESET_HOOK_ENTRY] };
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  console.log(`  Claude Code hook: configured (${settingsPath})`);
+}
 
 async function runStatus(): Promise<void> {
   const stashDir = resolve(process.env.FILESTASH_DIR ?? ".file-stash");
@@ -67,7 +143,7 @@ async function runStatusAll(root: string): Promise<void> {
   console.log(`\nSavings count re-reads within a session (unchanged files and diffs); a new session always receives full content.`);
 }
 
-async function runInit(): Promise<void> {
+async function runInit(withHooks: boolean): Promise<void> {
   const home = homedir();
 
   const mcpServersEntry = {
@@ -143,6 +219,14 @@ async function runInit(): Promise<void> {
     console.log(`  stash_clear      Reset the stash (re-sends full file contents on next read)`);
     console.log(`\nStash location: FILESTASH_DIR env var (default: .file-stash in cwd)`);
   }
+
+  console.log(`\nContext resets: after /clear or /compact the model loses file contents the stash still considers read.`);
+  if (withHooks) {
+    installClaudeHook(home);
+  } else {
+    console.log(`Add this to ~/.claude/settings.json (or re-run 'init --hooks' to merge it):\n`);
+    console.log(hooksSnippet());
+  }
 }
 
 function runHelp(): void {
@@ -150,6 +234,10 @@ function runHelp(): void {
 
 Usage:
   agent-file-stash init      Auto-configure for your editor
+  agent-file-stash init --hooks
+                             Also add the Claude Code context-reset hook to ~/.claude/settings.json
+  agent-file-stash reset     Forget what was read so the next read returns full content
+                             (--from-hook: quiet mode for Claude Code hooks)
   agent-file-stash serve     Start the MCP server (default)
   agent-file-stash status    Show stash statistics
   agent-file-stash status --all [dir]
@@ -169,7 +257,9 @@ if (!command || command === "serve") {
 } else if (command === "status") {
   await runStatus();
 } else if (command === "init") {
-  await runInit();
+  await runInit(process.argv.includes("--hooks"));
+} else if (command === "reset") {
+  await runReset(process.argv.includes("--from-hook"));
 } else if (command === "help" || command === "--help") {
   runHelp();
 } else {
