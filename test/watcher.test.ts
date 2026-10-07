@@ -16,16 +16,20 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function waitUntilWatching(stash: StashStore): Promise<void> {
+const PROBE_SETTLE_MS = 40;
+const PROBE_TIMEOUT_MS = 3000;
+
+async function waitUntilWatching(stash: StashStore, debounceMs: number): Promise<void> {
   const probe = join(TEST_DIR, "probe.ts");
-  await vi.waitFor(
-    () => {
-      writeFileSync(probe, "");
-      rmSync(probe);
-      expect(stash.onFileDeleted).toHaveBeenCalledWith(probe);
-    },
-    { timeout: 3000, interval: 150 },
-  );
+  const deadline = Date.now() + PROBE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    writeFileSync(probe, "");
+    await sleep(PROBE_SETTLE_MS);
+    rmSync(probe);
+    await sleep(debounceMs + PROBE_SETTLE_MS);
+    if (vi.mocked(stash.onFileDeleted).mock.calls.some(([p]) => p === probe)) return;
+  }
+  throw new Error("watcher did not report the probe deletion");
 }
 
 beforeAll(() => {
@@ -45,7 +49,7 @@ describe("FileWatcher", () => {
     const stash = makeMockStash();
     const watcher = new FileWatcher(stash, 20);
     watcher.watch([TEST_DIR]);
-    await waitUntilWatching(stash);
+    await waitUntilWatching(stash, 20);
 
     rmSync(filePath);
     await sleep(120); // debounce(20) + buffer
@@ -61,7 +65,7 @@ describe("FileWatcher", () => {
     const stash = makeMockStash();
     const watcher = new FileWatcher(stash, 80);
     watcher.watch([TEST_DIR]);
-    await waitUntilWatching(stash);
+    await waitUntilWatching(stash, 80);
 
     // Rapid create/delete cycles on same path generate multiple fs events
     // all within the debounce window — should collapse to one handleChange call
