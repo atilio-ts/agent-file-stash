@@ -41,4 +41,10 @@ export interface StashStats {
   tokensSaved: number;
   /** Approximate tokens saved in this session */
   sessionTokensSaved: number;
+  /** Reads served in this session */
+  sessionReads: number;
+  /** Tokens a plain read of the same content would have returned in this session */
+  sessionBaselineTokens: number;
+  /** Tokens actually returned by the stash in this session */
+  sessionSentTokens: number;
 }

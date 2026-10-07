@@ -200,7 +200,9 @@ export class StashStore {
     };
 
     if (isExcludedPath(absPath, this.exclude)) {
-      return { stashed: false, content: this.sliceContent(state), hash: currentHash, totalLines: currentLines };
+      const content = this.sliceContent(state);
+      this.recordRead(db, estimateTokens(content), estimateTokens(content));
+      return { stashed: false, content, hash: currentHash, totalLines: currentLines };
     }
 
     const lastRead = queryOne<{ hash: string }>(db,
@@ -227,22 +229,40 @@ export class StashStore {
       "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
     ).run(this.sessionId, s.absPath, s.currentHash, s.now);
 
-    return { stashed: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+    return this.fullSlice(db, s);
+  }
+
+  private fullSlice(db: DatabaseSync, s: ReadState): FileReadResult {
+    const content = this.sliceContent(s);
+    this.recordRead(db, estimateTokens(content), estimateTokens(content));
+    return { stashed: false, content, hash: s.currentHash, totalLines: s.currentLines };
+  }
+
+  private unchangedLabel(db: DatabaseSync, s: ReadState, label: (savedTokens: number) => string): FileReadResult {
+    const content = this.sliceContent(s);
+    const baseline = estimateTokens(content);
+    const saved = Math.max(0, baseline - estimateTokens(label(baseline)));
+    const text = label(saved);
+    const sent = estimateTokens(text);
+    const base = { stashed: true as const, hash: s.currentHash, totalLines: s.currentLines, linesChanged: 0 };
+    if (sent >= baseline) {
+      this.recordRead(db, baseline, baseline);
+      return { ...base, content };
+    }
+    this.recordRead(db, baseline, sent);
+    return { ...base, content: text };
   }
 
   private handleUnchanged(db: DatabaseSync, s: ReadState): FileReadResult {
-    const slicedTokens = estimateTokens(this.sliceContent(s));
-    this.addTokensSaved(db, slicedTokens);
-
     db.prepare(
       "UPDATE session_reads SET read_at = ? WHERE session_id = ? AND path = ?"
     ).run(s.now, this.sessionId, s.absPath);
 
-    const label = s.isPartial
-      ? `[filestash: unchanged, lines ${s.rangeStart}-${s.rangeEnd} of ${s.currentLines}, ${slicedTokens} tokens saved]`
-      : `[filestash: unchanged, ${s.currentLines} lines, ${slicedTokens} tokens saved]`;
-
-    return { stashed: true, content: label, hash: s.currentHash, totalLines: s.currentLines, linesChanged: 0 };
+    return this.unchangedLabel(db, s, (tokens) =>
+      s.isPartial
+        ? `[filestash: unchanged, lines ${s.rangeStart}-${s.rangeEnd} of ${s.currentLines}, ${tokens} tokens saved]`
+        : `[filestash: unchanged, ${s.currentLines} lines, ${tokens} tokens saved]`,
+    );
   }
 
   private handleChanged(db: DatabaseSync, s: ReadState, lastHash: string): FileReadResult {
@@ -265,33 +285,25 @@ export class StashStore {
       }
     }
 
-    return { stashed: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+    return this.fullSlice(db, s);
   }
 
   private handlePartialDiff(db: DatabaseSync, s: ReadState, diffResult: DiffResult): FileReadResult {
     if (!this.rangeHasChanges(diffResult.changedNewLines, s.rangeStart, s.rangeEnd)) {
-      const slicedTokens = estimateTokens(this.sliceContent(s));
-      this.addTokensSaved(db, slicedTokens);
-      return {
-        stashed: true,
-        content: `[filestash: unchanged in lines ${s.rangeStart}-${s.rangeEnd}, changes elsewhere in file, ${slicedTokens} tokens saved]`,
-        hash: s.currentHash,
-        totalLines: s.currentLines,
-        linesChanged: 0,
-      };
+      return this.unchangedLabel(db, s, (tokens) =>
+        `[filestash: unchanged in lines ${s.rangeStart}-${s.rangeEnd}, changes elsewhere in file, ${tokens} tokens saved]`,
+      );
     }
 
-    return { stashed: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+    return this.fullSlice(db, s);
   }
 
   private handleFullDiff(db: DatabaseSync, s: ReadState, diffResult: DiffResult): FileReadResult {
     const contentTokens = estimateTokens(s.currentContent);
     const diffTokens = estimateTokens(diffResult.diff);
-    if (diffTokens >= contentTokens) {
-      return { stashed: false, content: s.currentContent, hash: s.currentHash, totalLines: s.currentLines };
-    }
+    if (diffTokens >= contentTokens) return this.fullSlice(db, s);
 
-    this.addTokensSaved(db, contentTokens - diffTokens);
+    this.recordRead(db, contentTokens, diffTokens);
 
     return {
       stashed: true,
@@ -324,19 +336,24 @@ export class StashStore {
     ).run(absPath, hash, content, lines, now);
   }
 
-  // Always returns full content and resets session tracking. Never records token savings.
+  // Always returns full content and resets session tracking. Counts as a plain read (baseline equals sent).
   async readFileFull(filePath: string): Promise<FileReadResult> {
     await this.init();
     const db = this.getDb();
 
     const { absPath, content, hash, lines, now } = this.readFileSnapshot(filePath);
-    if (isExcludedPath(absPath, this.exclude)) return { stashed: false, content, hash, totalLines: lines };
+    const tokens = estimateTokens(content);
+    if (isExcludedPath(absPath, this.exclude)) {
+      this.recordRead(db, tokens, tokens);
+      return { stashed: false, content, hash, totalLines: lines };
+    }
 
     this.storeVersion(db, absPath, hash, content, lines, now);
     db.prepare(
       "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
     ).run(this.sessionId, absPath, hash, now);
 
+    this.recordRead(db, tokens, tokens);
     return { stashed: false, content, hash, totalLines: lines };
   }
 
@@ -359,10 +376,16 @@ export class StashStore {
       [this.sessionId],
     );
 
+    const sessionStat = (key: string) =>
+      queryOne<{ value: number }>(db, "SELECT value FROM session_stats WHERE session_id = ? AND key = ?", [this.sessionId, key])?.value ?? 0;
+
     return {
       filesTracked: versionRow?.c ?? 0,
       tokensSaved: tokenRow?.value ?? 0,
       sessionTokensSaved: sessionTokenRow?.value ?? 0,
+      sessionReads: sessionStat("reads"),
+      sessionBaselineTokens: sessionStat("baseline_tokens"),
+      sessionSentTokens: sessionStat("sent_tokens"),
     };
   }
 
@@ -389,12 +412,23 @@ export class StashStore {
     }
   }
 
+  private recordRead(db: DatabaseSync, baseline: number, sent: number): void {
+    this.bumpSessionStat(db, "reads", 1);
+    this.bumpSessionStat(db, "baseline_tokens", baseline);
+    this.bumpSessionStat(db, "sent_tokens", sent);
+    if (baseline > sent) this.addTokensSaved(db, baseline - sent);
+  }
+
+  private bumpSessionStat(db: DatabaseSync, key: string, n: number): void {
+    db.prepare(
+      "INSERT INTO session_stats (session_id, key, value) VALUES (?, ?, ?) ON CONFLICT(session_id, key) DO UPDATE SET value = value + ?"
+    ).run(this.sessionId, key, n, n);
+  }
+
   private addTokensSaved(db: DatabaseSync, tokens: number): void {
     db.prepare(
       "UPDATE stats SET value = value + ? WHERE key = 'tokens_saved'"
     ).run(tokens);
-    db.prepare(
-      "INSERT INTO session_stats (session_id, key, value) VALUES (?, 'tokens_saved', ?) ON CONFLICT(session_id, key) DO UPDATE SET value = value + ?"
-    ).run(this.sessionId, tokens, tokens);
+    this.bumpSessionStat(db, "tokens_saved", tokens);
   }
 }

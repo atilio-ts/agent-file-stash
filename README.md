@@ -59,7 +59,7 @@ The MCP server exposes 4 tools that agents discover and use automatically:
 |------|-------------|
 | `read_file` | Read a file with stashing. Returns full content on first read, `[unchanged]` label or diff on subsequent reads. Supports `offset`/`limit` for partial reads. |
 | `read_files` | Batch read multiple files at once with stashing. |
-| `stash_status` | Show stats: files tracked, tokens saved (total and per session). |
+| `stash_status` | Show files tracked and this session's accounting: reads, tokens a plain read would have sent, tokens actually sent, gross saved, tool-definition overhead (est.) and net saved (est.), plus lifetime gross saved. |
 | `stash_clear` | Reset the stash (clears all cached content and stats). |
 
 ### As a CLI
@@ -228,7 +228,8 @@ const r5 = await stash.readFileFull("src/auth.ts");
 
 // Stats
 const stats = await stash.getStats();
-// { filesTracked: 12, tokensSaved: 53851, sessionTokensSaved: 33205 }
+// { filesTracked: 12, tokensSaved: 53851, sessionTokensSaved: 33205,
+//   sessionReads: 80, sessionBaselineTokens: 61000, sessionSentTokens: 27795 }
 
 // Cleanup
 watcher.close();
@@ -242,10 +243,26 @@ await stash.close();
 | `stash.init()` | Initialize the database (called automatically on first read) |
 | `stash.readFile(path, opts?)` | Read with stashing. Options: `{ offset?: number; limit?: number }` |
 | `stash.readFileFull(path)` | Always return full content and reset session tracking for this file |
-| `stash.getStats()` | Return `{ filesTracked, tokensSaved, sessionTokensSaved }` |
+| `stash.getStats()` | Return `{ filesTracked, tokensSaved, sessionTokensSaved, sessionReads, sessionBaselineTokens, sessionSentTokens }` |
 | `stash.clear()` | Wipe all stashed content and stats |
 | `stash.resetReads()` | Forget read tracking for all sessions; next reads return full content |
 | `stash.close()` | Close the database connection |
+
+### Reading the numbers
+
+`stash_status` (and the one-line footer after repeat reads) reports net savings: gross saved (what a plain read of the same content would have returned minus what the stash actually returned) minus an estimate of the tokens the four tool definitions cost every session. Net can be negative, and it is shown as such. Savings only appear when files are re-read within a session; a session that reads each file once pays the tool-definition overhead and saves nothing. All figures use the same `ceil(characters / 4)` estimate and are approximate.
+
+```
+filestash status:
+  Files tracked: 12
+  This session: 80 reads
+    Would have sent (plain reads): ~61,000 tokens
+    Actually sent: ~27,795 tokens
+    Gross saved: ~33,205 tokens
+    Tool definitions overhead: ~277 tokens (est.)
+    Net saved: ~32,928 tokens (est.)
+  Gross saved (all sessions): ~53,851 tokens
+```
 
 ## Benchmark
 

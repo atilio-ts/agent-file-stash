@@ -100,7 +100,7 @@ describe("smoke tests", () => {
     lines[0] = "line 1: MODIFIED";
     lines[18] = "line 19: MODIFIED";
     writeFileSync(LONG_FILE, lines.join("\n"));
-    const r = await stash.readFile(LONG_FILE, { offset: 5, limit: 3 });
+    const r = await stash.readFile(LONG_FILE, { offset: 5, limit: 10 });
     expect(r.stashed).toBe(true);
     if (!r.stashed) throw new Error("expected stashed result");
     expect(r.linesChanged).toBe(0);

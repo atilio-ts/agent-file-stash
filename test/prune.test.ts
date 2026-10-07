@@ -75,7 +75,7 @@ async function seedClosedSession(dbPath: string, sessionId: string, pid: number)
 beforeAll(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
   mkdirSync(TEST_DIR, { recursive: true });
-  writeFileSync(FILE_PATH, "const x = 1;\n");
+  writeFileSync(FILE_PATH, "const x = 1;\n// padding padding padding padding padding padding padding padding padding padding padding padding \n");
   writeFileSync(OTHER_PATH, "const y = 2;\n");
 });
 

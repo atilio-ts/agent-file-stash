@@ -46,7 +46,7 @@ function runCli(args: string[], opts: { cwd?: string; env?: Record<string, strin
 beforeAll(() => {
   const build = spawnSync(join(ROOT, "node_modules", ".bin", "tsup"), [], { cwd: ROOT, encoding: "utf-8" });
   if (build.status !== 0) throw new Error(`build failed: ${build.stdout}${build.stderr}`);
-  writeFileSync(FILE_PATH, "const x = 1;\n");
+  writeFileSync(FILE_PATH, "const x = 1;\n// padding padding padding padding padding padding padding padding padding padding padding padding \n");
 });
 
 afterAll(async () => {
@@ -301,7 +301,7 @@ describe("MCP server integration", () => {
   test("repeat read is unchanged; after reset the read returns full content", async () => {
     const dir = newDir();
     const file = join(dir, "doc.ts");
-    writeFileSync(file, "export const answer = 42;\n");
+    writeFileSync(file, "export const answer = 42;\n// padding padding padding padding padding padding padding padding padding padding padding padding \n");
     const stashDir = join(dir, ".stash");
     const env = { FILESTASH_DIR: stashDir };
 

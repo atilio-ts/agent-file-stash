@@ -9,7 +9,7 @@ const FILE_PATH = join(TEST_DIR, "sample.ts");
 beforeAll(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
   mkdirSync(TEST_DIR, { recursive: true });
-  writeFileSync(FILE_PATH, `const x = 1;\n`);
+  writeFileSync(FILE_PATH, `const x = 1;\n// padding padding padding padding padding padding padding padding padding padding padding padding \n`);
 });
 
 afterAll(() => {

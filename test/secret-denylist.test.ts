@@ -127,7 +127,7 @@ describe("StashStore with excluded files", () => {
       expect(second.hash).toBe(first.hash);
       expect(count(dbPath, "SELECT COUNT(*) c FROM file_versions")).toBe(0);
       expect(count(dbPath, "SELECT COUNT(*) c FROM session_reads")).toBe(0);
-      expect(count(dbPath, "SELECT COUNT(*) c FROM session_stats")).toBe(0);
+      expect(count(dbPath, "SELECT COUNT(*) c FROM session_stats WHERE key = 'tokens_saved'")).toBe(0);
       expect(count(dbPath, "SELECT value c FROM stats WHERE key = 'tokens_saved'")).toBe(0);
       expect((await stash.getStats()).tokensSaved).toBe(0);
     } finally {
@@ -251,7 +251,7 @@ describe("MCP server", () => {
     const normal = join(dir, "doc.ts");
     writeFileSync(custom, "private notes body\n");
     writeFileSync(secretEnv, SECRET);
-    writeFileSync(normal, "export const answer = 42;\n");
+    writeFileSync(normal, "export const answer = 42;\n// padding padding padding padding padding padding padding padding padding padding padding padding \n");
 
     const transport = new StdioClientTransport({
       command: process.execPath,

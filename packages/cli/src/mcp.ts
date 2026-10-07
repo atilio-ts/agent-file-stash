@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createStash, type FileReadResult, type StashStore } from "filestash-sdk";
+import { createStash, type FileReadResult, type StashStats, type StashStore } from "filestash-sdk";
 import { resolve, join, relative, isAbsolute } from "node:path";
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -50,8 +50,99 @@ function formatFileEntry(path: string, result: FileReadResult): string {
   return `=== ${path} ===\n${result.content}`;
 }
 
-function statsSuffix(tokensSaved: number): string {
-  return `\n\n[filestash: ~${tokensSaved.toLocaleString()} tokens saved this session. Report this to the user when you complete their task.]`;
+const readFileShape = {
+  path: z.string().describe("File path"),
+  offset: z
+    .number()
+    .optional()
+    .describe("Start line (1-based)"),
+  limit: z
+    .number()
+    .optional()
+    .describe("Max lines"),
+  force: z
+    .boolean()
+    .optional()
+    .describe("Bypass stash"),
+};
+
+const readFilesShape = {
+  paths: z.preprocess(
+    (val) => (typeof val === "string" ? JSON.parse(val) : val),
+    z.array(z.string())
+  ).describe("File paths"),
+};
+
+export const TOOL_DEFS = {
+  read_file: {
+    description: `Read a file (use instead of Read). Repeat reads of an unchanged file return a short label, changed files return only a diff. offset/limit supported, partial reads are stashed too. force=true returns full content (use when the original is no longer in context).`,
+    inputSchema: readFileShape,
+  },
+  read_files: {
+    description: `Batched read_file for several files, same stash/diff behavior per file.`,
+    inputSchema: readFilesShape,
+  },
+  stash_status: {
+    description: `Show files tracked and this session's token accounting, net of tool-definition overhead.`,
+  },
+  stash_clear: {
+    description: `Clear all stashed data.`,
+  },
+};
+
+function jsonType(field: z.ZodTypeAny): string {
+  switch (field._def.typeName) {
+    case z.ZodFirstPartyTypeKind.ZodOptional:
+      return jsonType(field._def.innerType);
+    case z.ZodFirstPartyTypeKind.ZodEffects:
+      return jsonType(field._def.schema);
+    case z.ZodFirstPartyTypeKind.ZodArray:
+      return "array";
+    case z.ZodFirstPartyTypeKind.ZodNumber:
+      return "number";
+    case z.ZodFirstPartyTypeKind.ZodBoolean:
+      return "boolean";
+    default:
+      return "string";
+  }
+}
+
+function jsonSchema(shape: Record<string, z.ZodTypeAny> = {}): object {
+  const properties: Record<string, object> = {};
+  for (const [key, field] of Object.entries(shape)) {
+    properties[key] = { type: jsonType(field), description: field.description };
+  }
+  const required = Object.entries(shape).filter(([, f]) => !f.isOptional()).map(([k]) => k);
+  return { type: "object", properties, ...(required.length > 0 && { required }) };
+}
+
+export function toolDefinitionTokens(): number {
+  const defs = Object.entries(TOOL_DEFS).map(([name, def]) => ({
+    name,
+    description: def.description,
+    inputSchema: jsonSchema("inputSchema" in def ? def.inputSchema : undefined),
+  }));
+  return Math.ceil(JSON.stringify(defs).length / 4);
+}
+
+export function formatStatus(stats: StashStats, overheadTokens: number): string {
+  const fmt = (n: number) => `~${n.toLocaleString()}`;
+  const net = stats.sessionTokensSaved - overheadTokens;
+  return [
+    "filestash status:",
+    `  Files tracked: ${stats.filesTracked}`,
+    `  This session: ${stats.sessionReads} reads`,
+    `    Would have sent (plain reads): ${fmt(stats.sessionBaselineTokens)} tokens`,
+    `    Actually sent: ${fmt(stats.sessionSentTokens)} tokens`,
+    `    Gross saved: ${fmt(stats.sessionTokensSaved)} tokens`,
+    `    Tool definitions overhead: ${fmt(overheadTokens)} tokens (est.)`,
+    `    Net saved: ${fmt(net)} tokens (est.)`,
+    `  Gross saved (all sessions): ${fmt(stats.tokensSaved)} tokens`,
+  ].join("\n");
+}
+
+function statsSuffix(grossSaved: number): string {
+  return `\n\n[filestash: net ~${(grossSaved - toolDefinitionTokens()).toLocaleString()} tokens this session (est.)]`;
 }
 
 async function readSingleFile(
@@ -110,30 +201,7 @@ export async function startMcpServer(): Promise<void> {
 
   server.registerTool(
     "read_file",
-    {
-      description: `Read a file with stashing. Use this tool INSTEAD of the built-in Read tool for reading files.
-On first read, returns full content and stashes it — identical to Read.
-On subsequent reads, if the file hasn't changed, returns a short confirmation instead of the full content — saving significant tokens.
-If the file changed, returns only the diff (changed lines) instead of the full file.
-Supports offset and limit for partial reads — and partial reads are also stashed. If only lines outside the requested range changed, returns a short confirmation saving tokens.
-Set force=true to bypass the stash and get the full file content (use when you no longer have the original in context).
-ALWAYS prefer this over the Read tool. It is a drop-in replacement with stashing benefits.`,
-      inputSchema: {
-        path: z.string().describe("Path to the file to read"),
-        offset: z
-          .number()
-          .optional()
-          .describe("Line number to start reading from (1-based). Only provide if the file is too large to read at once."),
-        limit: z
-          .number()
-          .optional()
-          .describe("Number of lines to read. Only provide if the file is too large to read at once."),
-        force: z
-          .boolean()
-          .optional()
-          .describe("Bypass stash and return full content"),
-      },
-    },
+    TOOL_DEFS.read_file,
     async ({ path, force, offset, limit }) => {
       const absPath = resolve(path);
       if (!isPathAllowed(absPath, cwd)) {
@@ -170,17 +238,7 @@ ALWAYS prefer this over the Read tool. It is a drop-in replacement with stashing
 
   server.registerTool(
     "read_files",
-    {
-      description: `Read multiple files at once with stashing. Use this tool INSTEAD of the built-in Read tool when you need to read several files.
-Same behavior as read_file but batched. Returns stashed/diff results for each file.
-ALWAYS prefer this over multiple Read calls — it's faster and saves significant tokens.`,
-      inputSchema: {
-        paths: z.preprocess(
-          (val) => (typeof val === "string" ? JSON.parse(val) : val),
-          z.array(z.string())
-        ).describe("Paths to the files to read"),
-      },
-    },
+    TOOL_DEFS.read_files,
     async ({ paths }) => {
       const results = await Promise.all(paths.map(p => readSingleFile(p, cwd, stash)));
       const successfulPaths = paths.filter((_, i) => results[i]!.ok);
@@ -205,30 +263,27 @@ ALWAYS prefer this over multiple Read calls — it's faster and saves significan
 
   server.registerTool(
     "stash_status",
-    {
-      description: `Show filestash statistics: files tracked, tokens saved, stash hit rates.
-Use this to verify filestash is working and see how many tokens it has saved.`,
-    },
+    TOOL_DEFS.stash_status,
     async () => {
       const stats = await stash.getStats();
-      const text = [
-        `filestash status:`,
-        `  Files tracked: ${stats.filesTracked}`,
-        `  Tokens saved (this session): ~${stats.sessionTokensSaved.toLocaleString()}`,
-        `  Tokens saved (all sessions): ~${stats.tokensSaved.toLocaleString()}`,
-      ].join("\n");
+      const overhead = toolDefinitionTokens();
+      const text = formatStatus(stats, overhead);
       return {
         content: [{ type: "text" as const, text }],
-        _meta: { [`${META_NAMESPACE}/stats`]: { filesTracked: stats.filesTracked, tokensSaved: stats.tokensSaved, sessionTokensSaved: stats.sessionTokensSaved } },
+        _meta: {
+          [`${META_NAMESPACE}/stats`]: {
+            ...stats,
+            toolDefinitionTokens: overhead,
+            netTokensSaved: stats.sessionTokensSaved - overhead,
+          },
+        },
       };
     },
   );
 
   server.registerTool(
     "stash_clear",
-    {
-      description: `Clear all stashed data. Use this to reset the stash completely.`,
-    },
+    TOOL_DEFS.stash_clear,
     async () => {
       await stash.clear();
       return {
