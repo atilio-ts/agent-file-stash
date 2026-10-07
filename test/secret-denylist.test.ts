@@ -1,9 +1,8 @@
-import { describe, test, expect, beforeAll, afterAll } from "vitest";
+import { describe, test, expect, afterAll } from "vitest";
 import { createStash, isExcludedPath } from "filestash-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { DatabaseSync } from "node:sqlite";
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,11 +42,6 @@ function dump(dbPath: string): string {
     db.close();
   }
 }
-
-beforeAll(() => {
-  const build = spawnSync(join(ROOT, "node_modules", ".bin", "tsup"), [], { cwd: ROOT, encoding: "utf-8" });
-  if (build.status !== 0) throw new Error(`build failed: ${build.stdout}${build.stderr}`);
-});
 
 afterAll(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
