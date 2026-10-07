@@ -86,7 +86,7 @@ Detects installed editors and writes the MCP server entry into each config file 
   Claude Code: configured (/Users/you/.claude.json)
   OpenCode: already configured
 
-Done! Restart your editor to pick up filestash.
+Done! Restart your editor to pick up agent-file-stash.
 ```
 
 When no supported editor is detected, `init` prints the manual MCP snippet instead.

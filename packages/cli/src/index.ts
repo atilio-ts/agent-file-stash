@@ -95,7 +95,7 @@ async function runStatus(): Promise<void> {
   const dbPath = join(stashDir, "stash.db");
 
   if (!existsSync(dbPath)) {
-    console.log("No filestash database found. Run 'filestash serve' to start stashing.");
+    console.log("No filestash database found. Run 'agent-file-stash serve' to start stashing.");
     process.exit(0);
   }
 
@@ -208,10 +208,10 @@ async function runInit(withHooks: boolean): Promise<void> {
   }
 
   if (configured === 0) {
-    console.log("No supported tools detected. You can manually add filestash to your MCP config:");
+    console.log("No supported tools detected. You can manually add agent-file-stash to your MCP config:");
     console.log(JSON.stringify({ mcpServers: { "agent-file-stash": mcpServersEntry } }, null, 2));
   } else {
-    console.log(`\nDone! Restart your editor to pick up filestash.`);
+    console.log(`\nDone! Restart your editor to pick up agent-file-stash.`);
     console.log(`\nAvailable MCP tools:`);
     console.log(`  read_file        Read a file, returning only a diff if unchanged since last read`);
     console.log(`  read_files       Batch read multiple files at once`);
@@ -245,7 +245,8 @@ Usage:
   agent-file-stash help      Show this help message
 
 Environment:
-  FILESTASH_DIR       Stash directory (default: .file-stash)`);
+  FILESTASH_DIR       Stash directory (default: .file-stash)
+  FILESTASH_EXCLUDE   Extra comma-separated file name globs that are never stored`);
 }
 
 const command = process.argv[2];
@@ -263,6 +264,6 @@ if (!command || command === "serve") {
 } else if (command === "help" || command === "--help") {
   runHelp();
 } else {
-  console.error(`Unknown command: ${command}. Run 'filestash help' for usage.`);
+  console.error(`Unknown command: ${command}. Run 'agent-file-stash help' for usage.`);
   process.exit(1);
 }

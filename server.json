@@ -3,7 +3,7 @@
   "name": "io.github.atilio-ts/agent-file-stash",
   "description": "File stash with diff tracking for AI coding agents. Drop-in replacement for file reads that saves tokens.",
   "repository": {
-//    "url": "https://github.com/atilio-ts/filestash",
+    "url": "https://github.com/atilio-ts/agent-file-stash",
     "source": "github"
   },
   "version": "0.4.0",
