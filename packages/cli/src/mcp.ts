@@ -3,19 +3,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { createStash, type FileReadResult, type StashStats, type StashStore } from "filestash-sdk";
 import { resolve, join, relative, isAbsolute } from "node:path";
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 export function resolveStashDir(baseDir: string = process.cwd()): string {
   const raw = process.env.FILESTASH_DIR ?? ".file-stash";
   if (raw.includes("\0")) throw new Error("FILESTASH_DIR contains invalid characters");
   return resolve(baseDir, raw);
-}
-
-function getStashDir(): string {
-  const dir = resolveStashDir();
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return dir;
 }
 
 function parseExcludeEnv(): string[] {
@@ -125,11 +119,17 @@ export function toolDefinitionTokens(): number {
   return Math.ceil(JSON.stringify(defs).length / 4);
 }
 
+function degradedLine(reason = "unknown"): string {
+  return `Mode: DEGRADED (${reason}) - files are read normally, nothing is stashed`;
+}
+
 export function formatStatus(stats: StashStats, overheadTokens: number): string {
+  if (stats.degraded) return degradedLine(stats.degradedReason);
   const fmt = (n: number) => `~${n.toLocaleString()}`;
   const net = stats.sessionTokensSaved - overheadTokens;
   return [
     "filestash status:",
+    ...(stats.recoveredFrom ? [`  Recovered: corrupt database moved to ${stats.recoveredFrom}`] : []),
     `  Files tracked: ${stats.filesTracked}`,
     `  This session: ${stats.sessionReads} reads`,
     `    Would have sent (plain reads): ${fmt(stats.sessionBaselineTokens)} tokens`,
@@ -179,8 +179,7 @@ export async function startMcpServer(): Promise<void> {
     packageJson.mcpName || "io.github.glommer/filestash"
   ).replaceAll("/", ".");
 
-  const stashDir = getStashDir();
-  const dbPath = resolve(stashDir, "stash.db");
+  const dbPath = resolve(resolveStashDir(), "stash.db");
   const cwd = process.cwd();
   const watchPaths = [cwd];
 
@@ -286,6 +285,9 @@ export async function startMcpServer(): Promise<void> {
     TOOL_DEFS.stash_clear,
     async () => {
       await stash.clear();
+      if (stash.isDegraded) {
+        return { content: [{ type: "text" as const, text: "Stash is in degraded mode, nothing to clear." }] };
+      }
       return {
         content: [{ type: "text" as const, text: "Stash cleared." }],
         _meta: { [`${META_NAMESPACE}/cleared`]: true },

@@ -7,6 +7,10 @@ export interface StashConfig {
   watchPaths?: string[];
   /** Extra basename globs (`*`, `?`) that are never stored, in addition to the built-in secret denylist. */
   exclude?: string[];
+  /** Move a corrupt database aside and start a new one. Defaults to true. */
+  recoverCorrupt?: boolean;
+  /** Do not write recovery or degraded-mode notices to stderr. */
+  quiet?: boolean;
 }
 
 interface FileReadResultBase {
@@ -47,4 +51,10 @@ export interface StashStats {
   sessionBaselineTokens: number;
   /** Tokens actually returned by the stash in this session */
   sessionSentTokens: number;
+  /** True when the stash is unavailable and files are read without it */
+  degraded: boolean;
+  /** Why the stash is unavailable */
+  degradedReason?: string;
+  /** Path a corrupt database was moved to at startup */
+  recoveredFrom?: string;
 }

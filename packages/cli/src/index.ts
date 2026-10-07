@@ -1,4 +1,4 @@
-import { createStash } from "filestash-sdk";
+import { createStash, type StashStore } from "filestash-sdk";
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -19,6 +19,10 @@ const RESET_HOOK_ENTRY = {
   hooks: [{ type: "command", command: RESET_HOOK_COMMAND }],
 };
 const HOOK_STDIN_TIMEOUT_MS = 1000;
+
+function assertHealthy(stash: StashStore): void {
+  if (stash.isDegraded) throw new Error(stash.degradedReason);
+}
 
 async function readHookCwd(): Promise<string | undefined> {
   if (process.stdin.isTTY) return undefined;
@@ -46,9 +50,12 @@ async function runReset(fromHook: boolean): Promise<void> {
       if (!fromHook) console.log("No filestash database found. Nothing to reset.");
       return;
     }
-    const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION });
+    const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION, recoverCorrupt: false, quiet: true });
     try {
+      await stash.init();
+      assertHealthy(stash);
       await stash.resetReads();
+      assertHealthy(stash);
     } finally {
       await stash.close();
     }
@@ -99,15 +106,22 @@ async function runStatus(): Promise<void> {
     process.exit(0);
   }
 
-  const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION });
-  await stash.init();
-  const stats = await stash.getStats();
+  const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION, recoverCorrupt: false, quiet: true });
+  try {
+    await stash.init();
+    assertHealthy(stash);
+    const stats = await stash.getStats();
+    assertHealthy(stash);
 
-  console.log(`filestash status:`);
-  console.log(`  Files tracked:          ${stats.filesTracked}`);
-  console.log(`  Tokens saved (total):   ~${stats.tokensSaved.toLocaleString()}`);
-
-  await stash.close();
+    console.log(`filestash status:`);
+    console.log(`  Files tracked:          ${stats.filesTracked}`);
+    console.log(`  Tokens saved (total):   ~${stats.tokensSaved.toLocaleString()}`);
+  } catch (e: unknown) {
+    console.error(`filestash status failed for ${dbPath}: ${e instanceof Error ? e.message : String(e)}`);
+    process.exitCode = 1;
+  } finally {
+    await stash.close();
+  }
 }
 
 async function runStatusAll(root: string): Promise<void> {
@@ -119,10 +133,11 @@ async function runStatusAll(root: string): Promise<void> {
 
   const rows: { project: string; files: number; tokens: number }[] = [];
   for (const dbPath of databases) {
-    const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION });
+    const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION, recoverCorrupt: false, quiet: true });
     try {
       await stash.init();
       const stats = await stash.getStats();
+      assertHealthy(stash);
       rows.push({ project: resolve(dbPath, "../..").replace(/\/\.vscode$/, ""), files: stats.filesTracked, tokens: stats.tokensSaved });
     } catch (e: unknown) {
       console.error(`  skipped ${dbPath}: ${e instanceof Error ? e.message : String(e)}`);

@@ -16,28 +16,40 @@ export class FileWatcher {
   watch(paths: string[]): void {
     for (const p of paths) {
       const absPath = resolve(p);
-      const watcher = fsWatch(absPath, { recursive: true }, (event, filename) => {
-        if (!filename) return;
-        const filePath = resolve(absPath, filename);
+      let watcher: FSWatcher;
+      try {
+        watcher = fsWatch(absPath, { recursive: true }, (event, filename) => {
+          if (!filename) return;
+          const filePath = resolve(absPath, filename);
 
-        if (filename.startsWith(".") || filename.includes("node_modules") || filename.includes(".git")) {
-          return;
-        }
+          if (filename.startsWith(".") || filename.includes("node_modules") || filename.includes(".git")) {
+            return;
+          }
 
-        const existing = this.debounceTimers.get(filePath);
-        if (existing) clearTimeout(existing);
+          const existing = this.debounceTimers.get(filePath);
+          if (existing) clearTimeout(existing);
 
-        this.debounceTimers.set(
-          filePath,
-          setTimeout(() => {
-            this.debounceTimers.delete(filePath);
-            this.handleChange(filePath).catch((e: unknown) => {
-              process.stderr.write(
-                `[filestash] unhandled watcher error: ${e instanceof Error ? e.message : String(e)}\n`,
-              );
-            });
-          }, this.debounceMs),
-        );
+          this.debounceTimers.set(
+            filePath,
+            setTimeout(() => {
+              this.debounceTimers.delete(filePath);
+              this.handleChange(filePath).catch((e: unknown) => {
+                process.stderr.write(
+                  `[filestash] unhandled watcher error: ${e instanceof Error ? e.message : String(e)}\n`,
+                );
+              });
+            }, this.debounceMs),
+          );
+        });
+      } catch (e: unknown) {
+        process.stderr.write(`[filestash] file watching disabled for ${absPath}: ${e instanceof Error ? e.message : String(e)}\n`);
+        continue;
+      }
+
+      watcher.on("error", (e: Error) => {
+        process.stderr.write(`[filestash] file watching stopped for ${absPath}: ${e.message}\n`);
+        watcher.close();
+        this.watchers = this.watchers.filter((w) => w !== watcher);
       });
 
       this.watchers.push(watcher);

@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
-import { readFileSync, statSync, chmodSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, writeFileSync, statSync, chmodSync, mkdirSync, existsSync, renameSync, rmSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { computeDiff, type DiffResult } from "./differ.js";
 import { isExcludedPath } from "./exclude.js";
@@ -77,6 +77,60 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+const SQLITE_BUSY = 5;
+const SQLITE_LOCKED = 6;
+const SQLITE_IOERR = 10;
+const SQLITE_CORRUPT = 11;
+const SQLITE_NOTADB = 26;
+
+const OPEN_ATTEMPTS = 6;
+const OPEN_BACKOFF_MS = 150;
+const RECOVERY_LOCK_STALE_MS = 15_000;
+const RECOVERY_LOCK_WAIT_MS = 8_000;
+const RECOVERY_LOCK_POLL_MS = 50;
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isCorruptError(err: unknown): boolean {
+  const code = (err as { errcode?: number }).errcode;
+  if (typeof code === "number" && [SQLITE_CORRUPT, SQLITE_NOTADB].includes(code & 0xff)) return true;
+  return /not a database|malformed|corrupt/i.test(errorMessage(err));
+}
+
+function isTransientError(err: unknown): boolean {
+  const code = (err as { errcode?: number }).errcode;
+  if (typeof code === "number" && [SQLITE_BUSY, SQLITE_LOCKED, SQLITE_IOERR].includes(code & 0xff)) return true;
+  return /database is locked|database is busy|disk i\/o error/i.test(errorMessage(err));
+}
+
+function tryAcquireLock(lockPath: string): boolean {
+  try {
+    writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  try {
+    if (Date.now() - statSync(lockPath).mtimeMs < RECOVERY_LOCK_STALE_MS) return false;
+    rmSync(lockPath, { force: true });
+    writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForLockRelease(lockPath: string): Promise<void> {
+  const deadline = Date.now() + RECOVERY_LOCK_WAIT_MS;
+  while (existsSync(lockPath) && Date.now() < deadline) await sleep(RECOVERY_LOCK_POLL_MS);
+}
+
 function queryOne<T>(db: DatabaseSync, sql: string, params: (string | number)[] = []): T | undefined {
   const rows = db.prepare(sql).all(...params) as T[];
   return rows[0];
@@ -88,24 +142,127 @@ export class StashStore {
   private readonly sessionId: string;
   private readonly exclude: string[];
   private initialized = false;
+  private readonly recoverCorrupt: boolean;
+  private readonly quiet: boolean;
+  private recoveryAttempted = false;
+  private recoveredFrom: string | undefined;
+  private reason: string | undefined;
 
   constructor(config: StashConfig) {
     this.dbPath = config.dbPath;
     this.sessionId = config.sessionId;
     this.exclude = config.exclude ?? [];
+    this.recoverCorrupt = config.recoverCorrupt ?? true;
+    this.quiet = config.quiet ?? false;
+  }
+
+  get isDegraded(): boolean {
+    return this.reason !== undefined;
+  }
+
+  get degradedReason(): string | undefined {
+    return this.reason;
   }
 
   async init(): Promise<void> {
     if (this.initialized) return;
-    const { DatabaseSync } = await import("node:sqlite");
-    this.db = new DatabaseSync(this.dbPath);
-    this.db.exec("PRAGMA journal_mode=WAL");
-    this.db.exec("PRAGMA busy_timeout=5000");
-    this.db.exec(SCHEMA);
-    this.registerSession(this.db);
-    this.pruneClosedSessions(this.db);
-    this.restrictPermissions();
+    try {
+      this.db = await this.openWithRetry();
+    } catch (err) {
+      await this.recoverOrDegrade(err);
+    }
     this.initialized = true;
+  }
+
+  private async openWithRetry(): Promise<DatabaseSync> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.openDb();
+      } catch (err) {
+        if (attempt >= OPEN_ATTEMPTS || !isTransientError(err)) throw err;
+        await sleep(OPEN_BACKOFF_MS * attempt);
+      }
+    }
+  }
+
+  private async openDb(): Promise<DatabaseSync> {
+    const { DatabaseSync } = await import("node:sqlite");
+    mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+    const db = new DatabaseSync(this.dbPath);
+    try {
+      db.exec("PRAGMA busy_timeout=5000");
+      db.exec("PRAGMA journal_mode=WAL");
+      db.exec(SCHEMA);
+      this.registerSession(db);
+      this.pruneClosedSessions(db);
+    } catch (err) {
+      try {
+        db.close();
+      } catch {
+        // already unusable
+      }
+      throw err;
+    }
+    this.restrictPermissions();
+    return db;
+  }
+
+  private async recoverOrDegrade(err: unknown): Promise<void> {
+    if (!this.recoverCorrupt || this.recoveryAttempted || !isCorruptError(err)) return this.degrade(err);
+    this.recoveryAttempted = true;
+    const lockPath = `${this.dbPath}.recover.lock`;
+    try {
+      if (!tryAcquireLock(lockPath)) {
+        await waitForLockRelease(lockPath);
+        this.db = await this.openWithRetry();
+        return;
+      }
+      try {
+        try {
+          this.db = await this.openWithRetry();
+          return;
+        } catch (again) {
+          if (!isCorruptError(again)) throw again;
+        }
+        const moved = this.moveAside();
+        this.db = await this.openWithRetry();
+        this.recoveredFrom = moved;
+        this.notice(`${this.dbPath} is corrupt (${errorMessage(err)}); moved to ${moved}, starting a new stash`);
+      } finally {
+        rmSync(lockPath, { force: true });
+      }
+    } catch (retryErr) {
+      this.degrade(retryErr);
+    }
+  }
+
+  private moveAside(): string {
+    const target = `${this.dbPath}.corrupt-${Date.now()}`;
+    for (const suffix of ["-wal", "-shm", ""]) {
+      if (!existsSync(this.dbPath + suffix)) continue;
+      try {
+        renameSync(this.dbPath + suffix, target + suffix);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      }
+    }
+    return target;
+  }
+
+  private notice(message: string): void {
+    if (!this.quiet) process.stderr.write(`[filestash] ${message}\n`);
+  }
+
+  private degrade(err: unknown): void {
+    if (this.reason !== undefined) return;
+    this.reason = errorMessage(err);
+    this.notice(`stash unavailable (${this.reason}); files are read normally, nothing is stashed`);
+    try {
+      this.db?.close();
+    } catch {
+      // already unusable
+    }
+    this.db = null;
   }
 
   private restrictPermissions(): void {
@@ -139,7 +296,11 @@ export class StashStore {
       );
       db.exec("COMMIT");
     } catch (err) {
-      db.exec("ROLLBACK");
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // no open transaction
+      }
       throw err;
     }
   }
@@ -151,11 +312,6 @@ export class StashStore {
         if (isExcludedPath(path, this.exclude)) db.prepare(`DELETE FROM ${table} WHERE path = ?`).run(path);
       }
     }
-  }
-
-  private getDb(): DatabaseSync {
-    if (!this.db) throw new Error("StashStore not initialized. Call init() first.");
-    return this.db;
   }
 
   private readFileSnapshot(filePath: string): {
@@ -179,7 +335,6 @@ export class StashStore {
 
   async readFile(filePath: string, options?: { offset?: number; limit?: number }): Promise<FileReadResult> {
     await this.init();
-    const db = this.getDb();
 
     const { absPath, content: currentContent, hash: currentHash, lines: currentLines, now } = this.readFileSnapshot(filePath);
     const offset = options?.offset ?? 0;
@@ -199,15 +354,30 @@ export class StashStore {
       now,
     };
 
-    if (isExcludedPath(absPath, this.exclude)) {
+    if (this.db) {
+      try {
+        return this.readWithDb(this.db, state);
+      } catch (err) {
+        this.degrade(err);
+      }
+    }
+    return this.plainResult(state);
+  }
+
+  private plainResult(s: ReadState): FileReadResult {
+    return { stashed: false, content: this.sliceContent(s), hash: s.currentHash, totalLines: s.currentLines };
+  }
+
+  private readWithDb(db: DatabaseSync, state: ReadState): FileReadResult {
+    if (isExcludedPath(state.absPath, this.exclude)) {
       const content = this.sliceContent(state);
       this.recordRead(db, estimateTokens(content), estimateTokens(content));
-      return { stashed: false, content, hash: currentHash, totalLines: currentLines };
+      return { stashed: false, content, hash: state.currentHash, totalLines: state.currentLines };
     }
 
     const lastRead = queryOne<{ hash: string }>(db,
       "SELECT hash FROM session_reads WHERE session_id = ? AND path = ?",
-      [this.sessionId, absPath],
+      [this.sessionId, state.absPath],
     );
 
     if (!lastRead) {
@@ -216,7 +386,7 @@ export class StashStore {
 
     const lastHash = lastRead.hash;
 
-    if (lastHash === currentHash) {
+    if (lastHash === state.currentHash) {
       return this.handleUnchanged(db, state);
     }
 
@@ -339,77 +509,108 @@ export class StashStore {
   // Always returns full content and resets session tracking. Counts as a plain read (baseline equals sent).
   async readFileFull(filePath: string): Promise<FileReadResult> {
     await this.init();
-    const db = this.getDb();
 
     const { absPath, content, hash, lines, now } = this.readFileSnapshot(filePath);
-    const tokens = estimateTokens(content);
-    if (isExcludedPath(absPath, this.exclude)) {
-      this.recordRead(db, tokens, tokens);
-      return { stashed: false, content, hash, totalLines: lines };
+    const result: FileReadResult = { stashed: false, content, hash, totalLines: lines };
+    if (!this.db) return result;
+
+    try {
+      const tokens = estimateTokens(content);
+      if (!isExcludedPath(absPath, this.exclude)) {
+        this.storeVersion(this.db, absPath, hash, content, lines, now);
+        this.db.prepare(
+          "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
+        ).run(this.sessionId, absPath, hash, now);
+      }
+      this.recordRead(this.db, tokens, tokens);
+    } catch (err) {
+      this.degrade(err);
     }
-
-    this.storeVersion(db, absPath, hash, content, lines, now);
-    db.prepare(
-      "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
-    ).run(this.sessionId, absPath, hash, now);
-
-    this.recordRead(db, tokens, tokens);
-    return { stashed: false, content, hash, totalLines: lines };
+    return result;
   }
 
   async onFileDeleted(filePath: string): Promise<void> {
     await this.init();
-    const db = this.getDb();
     const absPath = resolve(filePath);
-    db.prepare("DELETE FROM file_versions WHERE path = ?").run(absPath);
-    db.prepare("DELETE FROM session_reads WHERE path = ?").run(absPath);
+    this.guarded((db) => {
+      db.prepare("DELETE FROM file_versions WHERE path = ?").run(absPath);
+      db.prepare("DELETE FROM session_reads WHERE path = ?").run(absPath);
+    });
+  }
+
+  private guarded<T>(fn: (db: DatabaseSync) => T): T | undefined {
+    if (!this.db) return undefined;
+    try {
+      return fn(this.db);
+    } catch (err) {
+      this.degrade(err);
+      return undefined;
+    }
   }
 
   async getStats(): Promise<StashStats> {
     await this.init();
-    const db = this.getDb();
 
-    const versionRow = queryOne<{ c: number }>(db, "SELECT COUNT(DISTINCT path) as c FROM file_versions");
-    const tokenRow = queryOne<{ value: number }>(db, "SELECT value FROM stats WHERE key = 'tokens_saved'");
-    const sessionTokenRow = queryOne<{ value: number }>(db,
-      "SELECT value FROM session_stats WHERE session_id = ? AND key = 'tokens_saved'",
-      [this.sessionId],
-    );
+    const stats = this.guarded((db): StashStats => {
+      const versionRow = queryOne<{ c: number }>(db, "SELECT COUNT(DISTINCT path) as c FROM file_versions");
+      const tokenRow = queryOne<{ value: number }>(db, "SELECT value FROM stats WHERE key = 'tokens_saved'");
+      const sessionStat = (key: string) =>
+        queryOne<{ value: number }>(db, "SELECT value FROM session_stats WHERE session_id = ? AND key = ?", [this.sessionId, key])?.value ?? 0;
 
-    const sessionStat = (key: string) =>
-      queryOne<{ value: number }>(db, "SELECT value FROM session_stats WHERE session_id = ? AND key = ?", [this.sessionId, key])?.value ?? 0;
+      return {
+        filesTracked: versionRow?.c ?? 0,
+        tokensSaved: tokenRow?.value ?? 0,
+        sessionTokensSaved: sessionStat("tokens_saved"),
+        sessionReads: sessionStat("reads"),
+        sessionBaselineTokens: sessionStat("baseline_tokens"),
+        sessionSentTokens: sessionStat("sent_tokens"),
+        degraded: false,
+        ...(this.recoveredFrom && { recoveredFrom: this.recoveredFrom }),
+      };
+    });
+    if (stats) return stats;
 
     return {
-      filesTracked: versionRow?.c ?? 0,
-      tokensSaved: tokenRow?.value ?? 0,
-      sessionTokensSaved: sessionTokenRow?.value ?? 0,
-      sessionReads: sessionStat("reads"),
-      sessionBaselineTokens: sessionStat("baseline_tokens"),
-      sessionSentTokens: sessionStat("sent_tokens"),
+      filesTracked: 0,
+      tokensSaved: 0,
+      sessionTokensSaved: 0,
+      sessionReads: 0,
+      sessionBaselineTokens: 0,
+      sessionSentTokens: 0,
+      degraded: true,
+      ...(this.reason && { degradedReason: this.reason }),
     };
   }
 
   async clear(): Promise<void> {
     await this.init();
-    const db = this.getDb();
-    db.prepare("DELETE FROM file_versions").run();
-    db.prepare("DELETE FROM session_reads").run();
-    db.prepare("DELETE FROM session_stats").run();
-    db.prepare("UPDATE stats SET value = 0").run();
+    this.guarded((db) => {
+      db.prepare("DELETE FROM file_versions").run();
+      db.prepare("DELETE FROM session_reads").run();
+      db.prepare("DELETE FROM session_stats").run();
+      db.prepare("UPDATE stats SET value = 0").run();
+    });
   }
 
   async resetReads(): Promise<void> {
     await this.init();
-    this.getDb().prepare("DELETE FROM session_reads").run();
+    this.guarded((db) => db.prepare("DELETE FROM session_reads").run());
   }
 
   async close(): Promise<void> {
-    if (this.db) {
+    if (!this.db) return;
+    try {
       this.db.prepare("DELETE FROM sessions WHERE session_id = ?").run(this.sessionId);
-      this.db.close();
-      this.db = null;
-      this.initialized = false;
+    } catch {
+      // database already unusable
     }
+    try {
+      this.db.close();
+    } catch {
+      // already closed
+    }
+    this.db = null;
+    this.initialized = false;
   }
 
   private recordRead(db: DatabaseSync, baseline: number, sent: number): void {

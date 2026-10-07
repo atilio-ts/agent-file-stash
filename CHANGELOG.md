@@ -16,9 +16,12 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 - Secret denylist: files that commonly hold secrets are never written to the stash, plus the `FILESTASH_EXCLUDE` variable and the SDK `exclude` option for extra patterns.
 - Net token savings: `stash_status` and the read footer report tool-definition overhead and net saved tokens alongside gross savings.
 - End-to-end test suite that runs real servers.
+- Fail-open stash: a corrupt database is moved aside to `stash.db.corrupt-<unix-ms>` and replaced, and when the stash cannot be used at all the server enters degraded mode and reads files normally. `StashStats` gains `degraded`, `degradedReason` and `recoveredFrom`; `StashConfig` gains `recoverCorrupt` and `quiet`.
 
 ### Fixed
 
+- The server no longer exits when the database is corrupt, the stash directory cannot be created, or `fs.watch` fails; `status`, `status --all` and `reset` report an unreadable database in one line instead of a stack trace.
+- Several servers starting at once on a corrupt database no longer degrade each other: recovery is serialised with a `stash.db.recover.lock` file (a stale lock older than 15 s is ignored), a database that another process already recovered is reused instead of moved again, transient lock errors while opening are retried, and `busy_timeout` is now set before switching to WAL.
 - Flaky watcher test: the test now waits until the watcher is live, and settles its probe on Linux.
 
 ## [0.4.0] - 2026-10-06

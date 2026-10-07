@@ -210,6 +210,16 @@ When a server starts, it prunes closed sessions: any other session whose process
 - Node.js 24 or later is required (`node:sqlite`).
 - The server only reads files inside its working directory.
 
+### Degraded mode
+
+The stash never prevents a file from being read. If the database or the stash directory cannot be used, the server keeps running and reads files normally.
+
+- A database that is corrupt (not a database, malformed) is treated as a disposable cache: it is renamed to `stash.db.corrupt-<unix-ms>` next to the original (with any `-wal`/`-shm` files given the same suffix), a fresh database is created, and one line is written to stderr. `stash_status` shows `Recovered: corrupt database moved to <path>`. The renamed file can be deleted. Recovery is attempted once per process and is serialised across processes with a `stash.db.recover.lock` file next to the database, so servers starting together on the same corrupt file recover it once.
+- If the stash directory cannot be created or written, or the database cannot be opened or locked, or any database call fails during a session, the stash switches to degraded mode for the rest of the process: reads return the plain file content, nothing is stashed, and one line is written to stderr with the reason. `stash_status` starts with `Mode: DEGRADED (<reason>) - files are read normally, nothing is stashed`, its metadata carries `degraded` and `degradedReason`, and `stash_clear` reports that there is nothing to clear.
+- Errors about the file being read (missing, unreadable, a directory) are still reported as errors.
+- If file watching cannot start (for example the OS watcher limit is reached) or fails later, one line is written to stderr and the server continues without it.
+- `status` and `reset` print a one-line error and exit 1 on an unreadable database (`reset --from-hook` exits 0); `status --all` skips it and continues.
+
 ### As an SDK
 
 The SDK lives in `packages/sdk` (workspace package `filestash-sdk`). It is bundled into the CLI and is not published to npm separately: `npm install agent-file-stash` installs the CLI/MCP server only and does not expose a library entry point. To embed it today, depend on the workspace package from a clone of this repository. The example below uses that package name.
@@ -267,10 +277,11 @@ await stash.close();
 | `stash.init()` | Initialize the database (called automatically on first read) |
 | `stash.readFile(path, opts?)` | Read with stashing. Options: `{ offset?: number; limit?: number }` |
 | `stash.readFileFull(path)` | Always return full content and reset session tracking for this file |
-| `stash.getStats()` | Return `{ filesTracked, tokensSaved, sessionTokensSaved, sessionReads, sessionBaselineTokens, sessionSentTokens }` |
+| `stash.getStats()` | Return `{ filesTracked, tokensSaved, sessionTokensSaved, sessionReads, sessionBaselineTokens, sessionSentTokens, degraded, degradedReason?, recoveredFrom? }` |
 | `stash.clear()` | Wipe all stashed content, read tracking and stats |
 | `stash.resetReads()` | Forget read tracking for all sessions; next reads return full content |
 | `stash.onFileDeleted(path)` | Drop stashed versions and read pointers for a path (called by `FileWatcher`) |
+| `stash.isDegraded` / `stash.degradedReason` | Whether the stash is unavailable (see [Degraded mode](#degraded-mode)) and why |
 | `stash.close()` | Remove this session's registration and close the database connection |
 
 **Public API for 1.0.** Stable: `createStash(config)`, the `StashStore` methods in the table above, `FileWatcher` (`watch(paths)`, `close()`), `isExcludedPath(absPath, extraPatterns?)` and the types `StashConfig`, `StashStats` and `FileReadResult`. Internal, not covered by compatibility guarantees: the database schema and file layout, the exact text of the "unchanged" labels, `computeDiff` (exported from the SDK index but used internally by `StashStore`), the `FileWatcher` debounce constructor argument, and everything not exported from `packages/sdk/src/index.ts`.

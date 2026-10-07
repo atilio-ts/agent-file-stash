@@ -168,6 +168,7 @@ describe("tool definition overhead", () => {
       sessionReads: 3,
       sessionBaselineTokens: 40,
       sessionSentTokens: 30,
+      degraded: false,
     };
     const text = formatStatus(stats, 100);
     expect(text).toContain("Files tracked: 2");
