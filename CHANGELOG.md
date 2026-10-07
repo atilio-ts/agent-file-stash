@@ -20,6 +20,7 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 
 ### Fixed
 
+- `unchanged` was returned for line ranges that had not been delivered to the model (for example a read of lines 200-204 after only lines 1-5 were read, or a whole-file read after a partial one). The stash now records the line ranges delivered per session and file version, answers `unchanged`, a diff or "changes elsewhere" only for lines already delivered, and returns real content otherwise. New `session_ranges` table; existing databases upgrade in place.
 - The server no longer exits when the database is corrupt, the stash directory cannot be created, or `fs.watch` fails; `status`, `status --all` and `reset` report an unreadable database in one line instead of a stack trace.
 - Several servers starting at once on a corrupt database no longer degrade each other: recovery is serialised with a `stash.db.recover.lock` file (a stale lock older than 15 s is ignored), a database that another process already recovered is reused instead of moved again, transient lock errors while opening are retried, and `busy_timeout` is now set before switching to WAL.
 - Flaky watcher test: the test now waits until the watcher is live, and settles its probe on Linux.

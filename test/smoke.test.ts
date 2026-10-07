@@ -95,6 +95,7 @@ describe("smoke tests", () => {
   });
 
   test("partial read, changes outside range — still stashed", async () => {
+    await stash.readFile(LONG_FILE);
     const longContent = Array.from({ length: 20 }, (_, i) => `line ${i + 1}: const x${i} = ${i};`).join("\n");
     const lines = longContent.split("\n");
     lines[0] = "line 1: MODIFIED";

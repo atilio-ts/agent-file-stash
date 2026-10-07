@@ -6,7 +6,7 @@
 
 Agents waste most of their token budget re-reading files they've already seen. agent-file-stash fixes this: on first read it stashes the file, on subsequent reads it returns either "unchanged" (one line instead of the whole file) or a compact diff of what changed.
 
-agent-file-stash is based on [cachebro](https://github.com/glommer/cachebro), an earlier tool with the same goal. cachebro required [Turso](https://turso.tech) as an external database dependency and lacked per-line-range stashing, meaning partial reads always returned the full file. agent-file-stash replaces Turso with `node:sqlite` — a built-in available since Node.js 24 — eliminating all external runtime dependencies. It also tracks partial reads independently by line range, so a re-read of lines 50–60 returns `[unchanged]` even if line 200 was edited. Additional improvements include a `readFileFull` method to force a full re-read and reset session tracking, proactive cache eviction when files are deleted via an optional file watcher, and a more accurate token estimate (`ceil(chars / 4)` vs the original `chars * 0.75`).
+agent-file-stash is based on [cachebro](https://github.com/glommer/cachebro), an earlier tool with the same goal. cachebro required [Turso](https://turso.tech) as an external database dependency and lacked per-line-range stashing, meaning partial reads always returned the full file. agent-file-stash replaces Turso with `node:sqlite` — a built-in available since Node.js 24 — eliminating all external runtime dependencies. It also records which line ranges were delivered to the model, so a re-read of lines 50–60 returns `[unchanged]` only if those lines were already delivered, even when line 200 was edited. Additional improvements include a `readFileFull` method to force a full re-read and reset session tracking, proactive cache eviction when files are deleted via an optional file watcher, and a more accurate token estimate (`ceil(chars / 4)` vs the original `chars * 0.75`).
 
 ```
 First read:   agent reads src/auth.ts → stashes content + hash → returns full file
@@ -22,7 +22,7 @@ The stash persists in a local SQLite database (Node.js built-in `node:sqlite`, W
 - **Up to ~50% fewer tokens** on repeated reads in the two-pass simulation, 24–26% on a real codebase (see [Benchmark](#benchmark)). Savings only apply to re-reads, see [When it saves tokens](#when-it-saves-tokens-and-when-it-does-not)
 - **Zero config** — one command auto-configures Claude Code, Cursor, and OpenCode
 - **No external services** — SQLite backed by Node.js 24 built-ins, no network required
-- **Partial-read aware** — tracks line ranges independently; returns an "unchanged in lines 50-59" label when only other parts of the file changed
+- **Partial-read aware** — tracks which line ranges were delivered to the model; returns an "unchanged in lines 50-59" label only for lines it already delivered, when only other parts of the file changed
 - **Agents adopt it on their own** — tool descriptions alone are enough; no explicit instructions needed
 ## Prerequisites
 
@@ -198,6 +198,7 @@ When a server starts, it prunes closed sessions: any other session whose process
 - Tiny files, and small partial ranges, are returned as plain content when the "unchanged" label would not be shorter.
 - When a diff is not smaller than the file (for example after a big rewrite), the full content is returned instead of the diff.
 - A partial read whose range was edited returns that range as plain content, not a diff.
+- "Unchanged", a diff and "changes elsewhere" are only answered for lines the model was already given in this session. A range that was never delivered (or only partly delivered) is returned as real content and added to what is recorded as delivered; adjacent and overlapping ranges merge, so reading 1-100 and then 101-200 makes a later read of 1-200 unchanged. If a file changed after only part of it was delivered, the requested lines are returned as plain content instead of a diff.
 - Excluded secret files (see [Privacy](#privacy)) are read normally and never stored, so they never produce savings.
 - The net figure subtracts an estimate of what the four tool definitions cost per session, so a session with few re-reads can show a negative net. All token counts use `ceil(characters / 4)` and are estimates.
 
@@ -376,23 +377,24 @@ The SDK has no external dependencies — it uses only Node.js built-ins (`node:s
 
 ## Architecture
 
-**Database:** Single SQLite file (`node:sqlite`, WAL mode) with five tables:
+**Database:** Single SQLite file (`node:sqlite`, WAL mode) with six tables:
 
 | Table | Purpose |
 |---|---|
 | `file_versions` | Content-addressed storage, keyed by `(path, hash)` |
 | `session_reads` | Per-session read pointers — tracks which version each session last saw |
+| `session_ranges` | Per-session, per-path line intervals already delivered for the current hash (merged) |
 | `sessions` | One row per live server process: session id and pid, used to prune closed sessions |
 | `stats` | Lifetime token-savings counter (survives pruning) |
 | `session_stats` | Per-session counters: reads, baseline tokens, sent tokens, tokens saved |
 
 `file_versions` is content-addressed: each row is a unique `(path, hash)` pair storing the full file content, its line count and a creation timestamp. When a file is read, its current content is hashed. If a matching row exists, no new version is written. If the hash is new, a new row is inserted. Diffs are not stored: on a changed re-read the diff is computed between the version the session last saw and the current content.
 
-`session_reads` is a lightweight pointer table. Each row is a `(sessionId, path, hash)` triple recording which version of a file a given session last saw. On re-read, the engine joins `session_reads` against `file_versions` to decide what to return: same hash → "unchanged" label; different hash → computed diff; no prior entry → full content. This means two agents running in parallel, or an agent reading across a branch switch, each get correct diffs scoped to their own session.
+`session_reads` is a lightweight pointer table. Each row is a `(sessionId, path, hash)` triple recording which version of a file a given session last saw. On re-read, the engine joins `session_reads` against `file_versions` to decide what to return: same hash → "unchanged" label; different hash → computed diff; no prior entry → full content. `session_ranges` holds the merged `(start_line, end_line)` intervals the session was given for the hash in `session_reads`. A re-read is answered with the "unchanged" label only when the requested lines fall inside those intervals; otherwise the real lines are returned and the interval is added. A diff or "changes elsewhere" label additionally requires that the whole previous version was delivered. Databases created before this table existed have no range rows, so the first read after upgrading returns real content. This means two agents running in parallel, or an agent reading across a branch switch, each get correct diffs scoped to their own session.
 
 WAL mode is enabled with a 5-second busy timeout so several servers can share one database and readers do not block the writer.
 
-**Pruning:** on startup each server deletes sessions whose pid is no longer alive, their read pointers and counters, and any `file_versions` row no remaining session points at. Rows for paths matching the secret denylist are removed at the same time. See [How sessions work](#how-sessions-work).
+**Pruning:** on startup each server deletes sessions whose pid is no longer alive, their read pointers, delivered ranges and counters, and any `file_versions` row no remaining session points at. Rows for paths matching the secret denylist are removed at the same time. See [How sessions work](#how-sessions-work).
 
 **Change detection:** On every read, the current file content is hashed (SHA-256, truncated to 16 hex chars). Same hash = unchanged. Different hash = compute diff, update stash. No polling or watchers required for correctness — the hash is the source of truth. File watchers are optional and only used to proactively evict deleted files.
 
