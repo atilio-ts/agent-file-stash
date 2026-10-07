@@ -10,19 +10,19 @@ agent-file-stash is based on [cachebro](https://github.com/glommer/cachebro), an
 
 ```
 First read:   agent reads src/auth.ts → stashes content + hash → returns full file
-Second read:  agent reads src/auth.ts → hash unchanged → returns "[unchanged, 245 lines, 1,837 tokens saved]"
+Second read:  agent reads src/auth.ts → hash unchanged → returns "[filestash: unchanged, 245 lines, 1837 tokens saved]"
 After edit:   agent reads src/auth.ts → hash changed → returns unified diff (only changed lines)
-Partial read: agent reads lines 50-60 → edit changed line 200 → returns "[unchanged in lines 50-60]"
+Partial read: agent reads lines 50-60 → edit changed line 200 → returns "[filestash: unchanged in lines 50-60, changes elsewhere in file, N tokens saved]"
 ```
 
 The stash persists in a local SQLite database (Node.js built-in `node:sqlite`, WAL mode). Content hashing (SHA-256) detects changes. No network, no external services, no configuration beyond a file path.
 
 ## Highlights
 
-- **50% fewer tokens** on repeated file reads — verified on real codebases
+- **Up to ~50% fewer tokens** on repeated reads in the two-pass simulation, 24–26% on a real codebase (see [Benchmark](#benchmark)). Savings only apply to re-reads, see [When it saves tokens](#when-it-saves-tokens-and-when-it-does-not)
 - **Zero config** — one command auto-configures Claude Code, Cursor, and OpenCode
 - **No external services** — SQLite backed by Node.js 24 built-ins, no network required
-- **Partial-read aware** — stashes line ranges independently; returns `[unchanged in lines 50-59]` when only other parts changed
+- **Partial-read aware** — tracks line ranges independently; returns an "unchanged in lines 50-59" label when only other parts of the file changed
 - **Agents adopt it on their own** — tool descriptions alone are enough; no explicit instructions needed
 ## Prerequisites
 
@@ -57,10 +57,12 @@ The MCP server exposes 4 tools that agents discover and use automatically:
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read a file with stashing. Returns full content on first read, `[unchanged]` label or diff on subsequent reads. Supports `offset`/`limit` for partial reads. |
-| `read_files` | Batch read multiple files at once with stashing. |
+| `read_file` | Read a file with stashing. Returns full content on first read, an "unchanged" label or diff on subsequent reads. Parameters: `path` (required), `offset` (1-based start line), `limit` (max lines), `force` (bypass the stash and return full content). |
+| `read_files` | Batch read multiple files at once with stashing. Parameter: `paths` (array of file paths). |
 | `stash_status` | Show files tracked and this session's accounting: reads, tokens a plain read would have sent, tokens actually sent, gross saved, tool-definition overhead (est.) and net saved (est.), plus lifetime gross saved. |
-| `stash_clear` | Reset the stash (clears all cached content and stats). |
+| `stash_clear` | Clear all stashed content, read tracking and stats. |
+
+Paths must be inside the server's working directory (symlinks are resolved before the check); anything outside is rejected with an error.
 
 ### As a CLI
 
@@ -78,7 +80,7 @@ Detects installed editors and writes the MCP server entry into each config file 
 | Cursor | `~/.cursor/mcp.json` |
 | OpenCode | `$XDG_CONFIG_HOME/opencode/opencode.json` |
 
-If the `agent-file-stash` key already exists in a config, that entry is left unchanged and reported as "already configured". After running, restart your editor to pick up the new server.
+`init` registers the server under the key `filestash` (inside `mcpServers`, or `mcp` for OpenCode). Only editors whose config directory exists are touched. If the `filestash` key already exists in a config, that entry is left unchanged and reported as "already configured". After running, restart your editor to pick up the new server.
 
 ```
   Claude Code: configured (/Users/you/.claude.json)
@@ -86,6 +88,8 @@ If the `agent-file-stash` key already exists in a config, that entry is left unc
 
 Done! Restart your editor to pick up filestash.
 ```
+
+When no supported editor is detected, `init` prints the manual MCP snippet instead.
 
 `init --hooks` also merges the context-reset hook (see [Context resets](#context-resets)) into `~/.claude/settings.json`. It is idempotent, keeps all existing settings, and saves the previous file as `settings.json.bak`. Without the flag, `init` only prints the snippet.
 
@@ -96,7 +100,7 @@ npx agent-file-stash serve
 # or just: npx agent-file-stash
 ```
 
-Starts the MCP server over stdio. This is the command editors invoke automatically — you don't normally run it yourself. The server registers four tools (`read_file`, `read_files`, `stash_status`, `stash_clear`) and keeps the stash database open for the lifetime of the process.
+Starts the MCP server over stdio. This is the command editors invoke automatically — you don't normally run it yourself. The server registers four tools (`read_file`, `read_files`, `stash_status`, `stash_clear`) and keeps the stash database open for the lifetime of the process. Each server process is one [session](#how-sessions-work), and it watches its working directory to evict deleted files from the stash.
 
 The stash database is created at `$FILESTASH_DIR/stash.db` (defaults to `.file-stash/stash.db` relative to the working directory the editor uses when launching the server).
 
@@ -106,7 +110,7 @@ The stash database is created at `$FILESTASH_DIR/stash.db` (defaults to `.file-s
 npx agent-file-stash status
 ```
 
-Prints lifetime stats from the local stash database. Exits with a message if no database exists yet.
+Prints files tracked and the lifetime tokens saved from the local stash database (`$FILESTASH_DIR/stash.db`, default `.file-stash/stash.db`). Exits with a message if no database exists yet. Per-session figures are only available from the `stash_status` tool.
 
 ```
 filestash status:
@@ -114,7 +118,7 @@ filestash status:
   Tokens saved (total):   ~53,851
 ```
 
-When each project keeps its own stash (for example with `FILESTASH_DIR=.vscode/file-stash`), sum all of them with `--all`. It scans the given directory (default: home) for `.file-stash/` and `file-stash/` folders:
+When each project keeps its own stash (for example with `FILESTASH_DIR=.vscode/file-stash`), sum all of them with `--all`. It scans the given directory (default: home) for `.file-stash/` and `file-stash/` folders containing a `stash.db` (up to 8 levels deep, skipping `node_modules`, `.git`, `build`, `dist`, `target`, `bin` and `obj`):
 
 ```bash
 npx agent-file-stash status --all ~/Projects
@@ -182,16 +186,36 @@ The server answers a repeat read of an unchanged file with a short "unchanged" n
 
 Limitation: subagents that use the MCP server by name share the parent's server process, so they share its read tracking. A subagent can be told "unchanged" for a file only the parent has seen; have it pass `force=true` on its first read of each file.
 
+### How sessions work
+
+A session is one MCP server process: each `serve` start generates a random session id and registers it with its process id in the `sessions` table. Read tracking is per session. A file is "unchanged" or a diff only relative to what that session last returned for it, so two editors (or two projects sharing one stash database) never see each other's reads.
+
+When a server starts, it prunes closed sessions: any other session whose process is no longer alive is deleted, together with its read pointers and per-session counters, and stashed file versions that no remaining session points at are removed. The lifetime counter (`Tokens saved (total)`, "Gross saved (all sessions)") is kept in a separate table and survives pruning. A server also removes its own `sessions` row on a clean shutdown. `reset` and `stash_clear` act on all sessions.
+
+### When it saves tokens and when it does not
+
+- Savings only come from re-reads of a file that is still in the model's context. The first read of any file in a session costs the same as a plain read, and a new session always starts with full content.
+- Tiny files, and small partial ranges, are returned as plain content when the "unchanged" label would not be shorter.
+- When a diff is not smaller than the file (for example after a big rewrite), the full content is returned instead of the diff.
+- A partial read whose range was edited returns that range as plain content, not a diff.
+- Excluded secret files (see [Privacy](#privacy)) are read normally and never stored, so they never produce savings.
+- The net figure subtracts an estimate of what the four tool definitions cost per session, so a session with few re-reads can show a negative net. All token counts use `ceil(characters / 4)` and are estimates.
+
+### Known limitations
+
+- Clients do not send a per-conversation id, so the server cannot tell that you ran `/clear` or `/compact`. Without the [reset hook](#context-resets) it can answer "unchanged" for content the model no longer has; `force=true` always returns full content.
+- Subagents that use the MCP server by name share the parent's server process and therefore its read tracking.
+- The secret denylist matches on file names only: symlinks are not resolved, so a link with an innocent name pointing at a secret file is stashed, and secrets in files with ordinary names are not detected.
+- Extra patterns in `FILESTASH_EXCLUDE` match basenames only, not directories or full paths.
+- Node.js 24 or later is required (`node:sqlite`).
+- The server only reads files inside its working directory.
+
 ### As an SDK
 
-Install and import directly if you want to embed stashing in your own tooling:
-
-```bash
-npm install agent-file-stash
-```
+The SDK lives in `packages/sdk` (workspace package `filestash-sdk`). It is bundled into the CLI and is not published to npm separately: `npm install agent-file-stash` installs the CLI/MCP server only and does not expose a library entry point. To embed it today, depend on the workspace package from a clone of this repository. The example below uses that package name.
 
 ```typescript
-import { createStash } from "agent-file-stash";
+import { createStash } from "filestash-sdk";
 
 const { stash, watcher } = createStash({
   dbPath: "./my-stash.db",
@@ -220,7 +244,7 @@ const r3 = await stash.readFile("src/auth.ts");
 
 // Partial read — only the lines you need
 const r4 = await stash.readFile("src/auth.ts", { offset: 50, limit: 10 });
-// Returns lines 50-59, or "[unchanged in lines 50-59]" if nothing changed there
+// Returns lines 50-59, or an "unchanged in lines 50-59" label if nothing changed there
 
 // Force a full re-read (bypasses stash, resets session tracking for this file)
 const r5 = await stash.readFileFull("src/auth.ts");
@@ -244,13 +268,16 @@ await stash.close();
 | `stash.readFile(path, opts?)` | Read with stashing. Options: `{ offset?: number; limit?: number }` |
 | `stash.readFileFull(path)` | Always return full content and reset session tracking for this file |
 | `stash.getStats()` | Return `{ filesTracked, tokensSaved, sessionTokensSaved, sessionReads, sessionBaselineTokens, sessionSentTokens }` |
-| `stash.clear()` | Wipe all stashed content and stats |
+| `stash.clear()` | Wipe all stashed content, read tracking and stats |
 | `stash.resetReads()` | Forget read tracking for all sessions; next reads return full content |
-| `stash.close()` | Close the database connection |
+| `stash.onFileDeleted(path)` | Drop stashed versions and read pointers for a path (called by `FileWatcher`) |
+| `stash.close()` | Remove this session's registration and close the database connection |
+
+**Public API for 1.0.** Stable: `createStash(config)`, the `StashStore` methods in the table above, `FileWatcher` (`watch(paths)`, `close()`), `isExcludedPath(absPath, extraPatterns?)` and the types `StashConfig`, `StashStats` and `FileReadResult`. Internal, not covered by compatibility guarantees: the database schema and file layout, the exact text of the "unchanged" labels, `computeDiff` (exported from the SDK index but used internally by `StashStore`), the `FileWatcher` debounce constructor argument, and everything not exported from `packages/sdk/src/index.ts`.
 
 ### Reading the numbers
 
-`stash_status` (and the one-line footer after repeat reads) reports net savings: gross saved (what a plain read of the same content would have returned minus what the stash actually returned) minus an estimate of the tokens the four tool definitions cost every session. Net can be negative, and it is shown as such. Savings only appear when files are re-read within a session; a session that reads each file once pays the tool-definition overhead and saves nothing. All figures use the same `ceil(characters / 4)` estimate and are approximate.
+`stash_status` (and the `[filestash: net ~N tokens this session (est.)]` footer appended to `read_file` results served from the stash, and to `read_files` results once the session has saved anything) reports net savings: gross saved (what a plain read of the same content would have returned minus what the stash actually returned) minus an estimate of the tokens the four tool definitions cost every session. Net can be negative, and it is shown as such. Savings only appear when files are re-read within a session; a session that reads each file once pays the tool-definition overhead and saves nothing. All figures use the same `ceil(characters / 4)` estimate and are approximate.
 
 ```
 filestash status:
@@ -304,15 +331,17 @@ _Run `pnpm benchmark` to reproduce._
 ```
 packages/
 ├── sdk/src/
-│   ├── index.ts      Public exports: createStash, StashStore, FileWatcher, computeDiff, types
-│   ├── stash.ts      StashStore — SQLite-backed content-addressed stash with per-session read tracking
+│   ├── index.ts      Exports: createStash, StashStore, FileWatcher, computeDiff, isExcludedPath, types
+│   ├── stash.ts      StashStore — SQLite-backed content-addressed stash with per-session read tracking and pruning
 │   ├── differ.ts     computeDiff — line-based LCS diff (unified format, LCS capped at 5 000 lines)
+│   ├── exclude.ts    isExcludedPath — secret-file denylist and FILESTASH_EXCLUDE patterns
 │   ├── watcher.ts    FileWatcher — debounced fs.watch wrapper that evicts deleted files from the stash
 │   └── types.ts      StashConfig, FileReadResult, StashStats type definitions
 │
 └── cli/src/
     ├── index.ts      CLI entry point — init, serve, status, reset, help commands
-    └── mcp.ts        MCP server — registers read_file, read_files, stash_status, stash_clear tools
+    ├── mcp.ts        MCP server — registers read_file, read_files, stash_status, stash_clear tools
+    └── scan.ts       findStashDatabases — locates stash databases for status --all
 
 test/
 ├── smoke.test.ts         End-to-end flows: first read, stash hit, diff on change, partial reads, multi-session isolation
@@ -321,6 +350,14 @@ test/
 ├── watcher.test.ts       FileWatcher: deletion detection, debounce coalescence, close() cancellation
 ├── mcp-tools.test.ts     Unit tests for isPathAllowed (path traversal guard) and formatReadResult
 ├── mcp-meta.test.ts      Validates the _meta field format and reverse-DNS namespace convention
+├── diff-guard.test.ts    Full content is returned when a diff is not smaller than the file
+├── prune.test.ts         Pruning of closed sessions and their data
+├── scan.test.ts          findStashDatabases (status --all)
+├── secret-denylist.test.ts  Secret files and FILESTASH_EXCLUDE patterns are never stored
+├── session-reset.test.ts resetReads, the reset command, init --hooks, MCP integration
+├── savings-regression.test.ts  Session accounting identity, savings workload, tool definition overhead
+├── e2e.test.ts           End-to-end suite with real servers: concurrent servers, crash safety, secrets, path restriction, shutdown
+├── docs.test.ts          README mentions every CLI command, FILESTASH_* variable and MCP tool
 └── benchmark.ts          Reproducible two-pass simulation across generated TypeScript files (pnpm benchmark)
 ```
 
@@ -328,26 +365,29 @@ The SDK has no external dependencies — it uses only Node.js built-ins (`node:s
 
 ## Architecture
 
-**Database:** Single SQLite file (`node:sqlite`, WAL mode) with four tables:
+**Database:** Single SQLite file (`node:sqlite`, WAL mode) with five tables:
 
 | Table | Purpose |
 |---|---|
 | `file_versions` | Content-addressed storage, keyed by `(path, hash)` |
 | `session_reads` | Per-session read pointers — tracks which version each session last saw |
-| `stats` | Global token-savings counter |
-| `session_stats` | Per-session token-savings counter |
+| `sessions` | One row per live server process: session id and pid, used to prune closed sessions |
+| `stats` | Lifetime token-savings counter (survives pruning) |
+| `session_stats` | Per-session counters: reads, baseline tokens, sent tokens, tokens saved |
 
-`file_versions` is content-addressed: each row is a unique `(path, hash)` pair storing the full file content and its diff relative to the previous version at that path. When a file is read, its current content is hashed. If a matching row exists, no write occurs — the read is free. If the hash is new, a new row is inserted and the diff is computed and stored alongside it.
+`file_versions` is content-addressed: each row is a unique `(path, hash)` pair storing the full file content, its line count and a creation timestamp. When a file is read, its current content is hashed. If a matching row exists, no new version is written. If the hash is new, a new row is inserted. Diffs are not stored: on a changed re-read the diff is computed between the version the session last saw and the current content.
 
-`session_reads` is a lightweight pointer table. Each row is a `(sessionId, path, hash)` triple recording which version of a file a given session last saw. On re-read, the engine joins `session_reads` against `file_versions` to decide what to return: same hash → `[unchanged]` label; different hash → stored diff; no prior entry → full content. This means two agents running in parallel, or an agent reading across a branch switch, each get correct diffs scoped to their own session.
+`session_reads` is a lightweight pointer table. Each row is a `(sessionId, path, hash)` triple recording which version of a file a given session last saw. On re-read, the engine joins `session_reads` against `file_versions` to decide what to return: same hash → "unchanged" label; different hash → computed diff; no prior entry → full content. This means two agents running in parallel, or an agent reading across a branch switch, each get correct diffs scoped to their own session.
 
-WAL mode is enabled so concurrent reads never block each other and reads never block writes — important when multiple MCP tool calls fire in quick succession.
+WAL mode is enabled with a 5-second busy timeout so several servers can share one database and readers do not block the writer.
+
+**Pruning:** on startup each server deletes sessions whose pid is no longer alive, their read pointers and counters, and any `file_versions` row no remaining session points at. Rows for paths matching the secret denylist are removed at the same time. See [How sessions work](#how-sessions-work).
 
 **Change detection:** On every read, the current file content is hashed (SHA-256, truncated to 16 hex chars). Same hash = unchanged. Different hash = compute diff, update stash. No polling or watchers required for correctness — the hash is the source of truth. File watchers are optional and only used to proactively evict deleted files.
 
-**Diff algorithm:** Line-based unified diff (`computeDiff`). Groups changed lines into hunks with context lines, identical to the output of `git diff`. Diffs are stored as strings and returned verbatim to the agent.
+**Diff algorithm:** Line-based unified diff (`computeDiff`). Groups changed lines into hunks with context lines, in unified format with 3 lines of context. The diff is returned verbatim to the agent, unless it is not smaller than the file, in which case the full content is returned.
 
-**Token estimation:** `ceil(characters / 4)`. Rough but directionally correct for code. Used only for the "tokens saved" metric — never affects correctness.
+**Token estimation:** `ceil(characters / 4)`. Rough but directionally correct for code. Used for the token metrics and to decide whether a label or diff is actually shorter than the plain content; it never changes what the file contains.
 
 ## Uninstall
 
@@ -361,9 +401,13 @@ Remove the `agent-file-stash` entry from each config file where `init` added it:
 | Cursor | `~/.cursor/mcp.json` |
 | OpenCode | `$XDG_CONFIG_HOME/opencode/opencode.json` |
 
-Delete the `"agent-file-stash"` key from the `mcpServers` object in each file, then restart your editor.
+Delete the `"filestash"` key (the one `init` adds; also `"agent-file-stash"` if you configured it by hand) from the `mcpServers` object in each file (the `mcp` object for OpenCode), then restart your editor.
 
-**2. Remove the stash database**
+**2. Remove the Claude Code hook**
+
+If you ran `init --hooks` (or pasted the snippet from [Context resets](#context-resets)), remove the `SessionStart` entry whose command is `npx agent-file-stash reset --from-hook` from `~/.claude/settings.json`. `init --hooks` also left a backup of the previous file at `~/.claude/settings.json.bak`, which you can delete.
+
+**3. Remove the stash database**
 
 ```bash
 rm -rf .file-stash/
@@ -371,7 +415,7 @@ rm -rf .file-stash/
 
 This deletes the SQLite database and all cached content. If you set a custom `FILESTASH_DIR`, remove that directory instead.
 
-**3. Remove the package** _(if installed globally)_
+**4. Remove the package** _(if installed globally)_
 
 ```bash
 npm uninstall -g agent-file-stash

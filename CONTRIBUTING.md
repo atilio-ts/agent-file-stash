@@ -39,6 +39,28 @@ pnpm benchmark
 
 This runs a reproducible simulation of the two-pass read workflow described in the README. Results are averaged over 5 runs per scenario.
 
+## Releasing
+
+Only the root package `agent-file-stash` is published; `packages/sdk` and `packages/cli` are private workspace packages bundled into it, and their versions are not bumped.
+
+1. Move the `[Unreleased]` entries in `CHANGELOG.md` under the new version.
+2. Bump the version in `package.json` (`version`) and in `server.json` (the top-level `version` and `packages[0].version`).
+3. Commit with the message `build: bump to X.Y.Z` and push to `main`.
+4. Wait for the CI workflow (`.github/workflows/ci.yml`) to pass on `main`. It runs on Ubuntu: it installs with `--frozen-lockfile`, builds, runs the tests and runs `node dist/cli.mjs help`. The watcher test depends on inotify behavior, so also run the suite on Linux before releasing:
+
+   ```bash
+   docker run --rm -v "$PWD":/src:ro node:24 sh -c 'git clone -q /src /app && cd /app && corepack enable && pnpm install --frozen-lockfile && pnpm test'
+   ```
+
+5. Create a GitHub release for the tag `vX.Y.Z` targeting that commit. Publishing the release triggers `.github/workflows/publish.yml`, which installs, builds, tests and runs `npm publish --provenance --access public` using npm OIDC trusted publishing (no npm token).
+6. Verify the published version:
+
+   ```bash
+   npm view agent-file-stash version
+   ```
+
+Never run `npm publish` by hand: the release is published by the workflow, and a manual publish leaves the GitHub release and tag out of sync with npm.
+
 ## Submitting changes
 
 - Follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages.

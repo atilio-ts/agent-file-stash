@@ -58,5 +58,8 @@
     "url": "git+https://github.com/atilio-ts/agent-file-stash.git"
   },
   "homepage": "https://github.com/atilio-ts/agent-file-stash",
+  "bugs": {
+    "url": "https://github.com/atilio-ts/agent-file-stash/issues"
+  },
   "packageManager": "pnpm@10.29.3"
 }
