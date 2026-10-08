@@ -142,6 +142,16 @@ npx agent-file-stash reset
 
 Forgets what each session has read, so the next read of every file returns the full content. Stats and stashed versions are kept. It resolves `FILESTASH_DIR` like the server does and exits 0 if no database exists. Meant to be run by a Claude Code hook (see [Context resets](#context-resets)); `--from-hook` reads the hook JSON from stdin, resolves a relative `FILESTASH_DIR` against its `cwd`, and stays silent.
 
+#### `doctor`
+
+```bash
+npx agent-file-stash doctor
+npx agent-file-stash doctor --json
+npx agent-file-stash doctor --check-updates
+```
+
+Read-only diagnostics that tell you whether the install works and what to fix. It checks the Node version, the stash directory and database (schema version, integrity, permissions, leftover recovery files), the MCP registration in Claude Code, Cursor and OpenCode, the context-reset hook, and the `FILESTASH_*` limits. It never creates, changes or deletes any file or setting (when a running server holds the database, SQLite may refresh the timestamp of its shared-memory index file `stash.db-shm`, as any reader does) and makes no network call unless you pass `--check-updates`, which compares the installed version with `npm view`. Each line is `[ok]`, `[warn]`, `[error]` or `[info]`, followed by a fix hint for warnings and errors; `--json` prints the same results as a JSON array and nothing else. The exit code is 1 when any check reports an error and 0 otherwise.
+
 #### `help`
 
 ```bash

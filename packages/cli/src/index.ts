@@ -4,6 +4,8 @@ import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from
 import { homedir } from "node:os";
 import { startMcpServer, resolveStashDir } from "./mcp.js";
 import { findStashDatabases } from "./scan.js";
+import { editorTargets } from "./editors.js";
+import { runDoctor } from "./doctor.js";
 
 // Suppress the node:sqlite experimental warning before sqlite is dynamically loaded
 const _origEmitWarning = process.emitWarning;
@@ -161,38 +163,7 @@ async function runStatusAll(root: string): Promise<void> {
 async function runInit(withHooks: boolean): Promise<void> {
   const home = homedir();
 
-  const mcpServersEntry = {
-    command: "npx",
-    args: ["agent-file-stash", "serve"],
-  };
-
-  const opencodeMcpEntry = {
-    type: "local" as const,
-    command: ["npx", "agent-file-stash", "serve"],
-  };
-
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, ".config");
-
-  const targets = [
-    {
-      name: "Claude Code",
-      path: join(home, ".claude.json"),
-      key: "mcpServers",
-      entry: mcpServersEntry,
-    },
-    {
-      name: "Cursor",
-      path: join(home, ".cursor", "mcp.json"),
-      key: "mcpServers",
-      entry: mcpServersEntry,
-    },
-    {
-      name: "OpenCode",
-      path: join(xdgConfig, "opencode", "opencode.json"),
-      key: "mcp",
-      entry: opencodeMcpEntry,
-    },
-  ];
+  const targets = editorTargets(home);
 
   let configured = 0;
 
@@ -224,7 +195,7 @@ async function runInit(withHooks: boolean): Promise<void> {
 
   if (configured === 0) {
     console.log("No supported tools detected. You can manually add agent-file-stash to your MCP config:");
-    console.log(JSON.stringify({ mcpServers: { "agent-file-stash": mcpServersEntry } }, null, 2));
+    console.log(JSON.stringify({ mcpServers: { "agent-file-stash": targets[0]!.entry } }, null, 2));
   } else {
     console.log(`\nDone! Restart your editor to pick up agent-file-stash.`);
     console.log(`\nAvailable MCP tools:`);
@@ -257,6 +228,8 @@ Usage:
   agent-file-stash status    Show stash statistics
   agent-file-stash status --all [dir]
                              Sum statistics of every stash under dir (default: home)
+  agent-file-stash doctor    Check the install and report what to fix (read-only)
+                             (--json: machine-readable output, --check-updates: ask npm for the latest version)
   agent-file-stash help      Show this help message
 
 Environment:
@@ -278,6 +251,8 @@ if (!command || command === "serve") {
   await runInit(process.argv.includes("--hooks"));
 } else if (command === "reset") {
   await runReset(process.argv.includes("--from-hook"));
+} else if (command === "doctor") {
+  process.exitCode = await runDoctor(process.argv.slice(3));
 } else if (command === "help" || command === "--help") {
   runHelp();
 } else {
