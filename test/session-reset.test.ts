@@ -273,7 +273,8 @@ describe("init hooks", () => {
     const once = settingsOf(home);
     expect(once.model).toBe("opus");
     expect(once.permissions).toEqual(original.permissions);
-    expect(once.hooks.PreToolUse).toEqual(original.hooks.PreToolUse);
+    expect(once.hooks.PreToolUse[0]).toEqual(original.hooks.PreToolUse[0]);
+    expect(once.hooks.PreToolUse).toHaveLength(2);
     expect(once.hooks.SessionStart[0]).toEqual(original.hooks.SessionStart[0]);
     expect(countHook(once)).toBe(1);
     expect(readFileSync(`${settingsPath}.bak`, "utf-8")).toBe(originalText);

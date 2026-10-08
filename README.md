@@ -57,7 +57,7 @@ The MCP server exposes 4 tools that agents discover and use automatically:
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read a file with stashing. Returns full content on first read, an "unchanged" label or diff on subsequent reads. Parameters: `path` (required), `offset` (1-based start line), `limit` (max lines), `force` (bypass the stash and return full content). |
+| `read_file` | Read a file with stashing. Returns full content on first read, an "unchanged" label or diff on subsequent reads. Parameters: `path` (required), `offset` (1-based start line), `limit` (max lines), `force` (bypass the stash and return full content), `agent` (read-tracking scope, normally set by the [subagent hook](#subagents)). |
 | `read_files` | Batch read multiple files at once with stashing. Parameter: `paths` (array of file paths). |
 | `stash_status` | Show files tracked and this session's accounting: reads, tokens a plain read would have sent, tokens actually sent, gross saved, tool-definition overhead (est.) and net saved (est.), plus lifetime gross saved. |
 | `stash_clear` | Clear all stashed content, read tracking and stats. |
@@ -91,7 +91,7 @@ Done! Restart your editor to pick up agent-file-stash.
 
 When no supported editor is detected, `init` prints the manual MCP snippet instead.
 
-`init --hooks` also merges the context-reset hook (see [Context resets](#context-resets)) into `~/.claude/settings.json`. It is idempotent, keeps all existing settings, and saves the previous file as `settings.json.bak`. Without the flag, `init` only prints the snippet.
+`init --hooks` also merges the context-reset hook (see [Context resets](#context-resets)) and the subagent scope hook (see [Subagents](#subagents)) into `~/.claude/settings.json`. It is idempotent, keeps all existing settings, and saves the previous file as `settings.json.bak`. Without the flag, `init` only prints the snippet.
 
 #### `serve`
 
@@ -142,6 +142,14 @@ npx agent-file-stash reset
 
 Forgets what each session has read, so the next read of every file returns the full content. Stats and stashed versions are kept. It resolves `FILESTASH_DIR` like the server does and exits 0 if no database exists. Meant to be run by a Claude Code hook (see [Context resets](#context-resets)); `--from-hook` reads the hook JSON from stdin, resolves a relative `FILESTASH_DIR` against its `cwd`, and stays silent.
 
+#### `hook`
+
+```bash
+npx agent-file-stash hook subagent-scope
+```
+
+A Claude Code `PreToolUse` hook, not meant to be run by hand (see [Subagents](#subagents)). It reads the hook JSON from stdin and, when the call comes from a subagent to `read_file` or `read_files`, prints the same arguments plus an `agent` argument so the server tracks that subagent separately. For every other call it prints nothing and exits 0. It never opens the database and never grants or changes permissions.
+
 #### `doctor`
 
 ```bash
@@ -150,7 +158,7 @@ npx agent-file-stash doctor --json
 npx agent-file-stash doctor --check-updates
 ```
 
-Read-only diagnostics that tell you whether the install works and what to fix. It checks the Node version, the stash directory and database (schema version, integrity, permissions, leftover recovery files), the MCP registration in Claude Code, Cursor and OpenCode, the context-reset hook, and the `FILESTASH_*` limits. It never creates, changes or deletes any file or setting (when a running server holds the database, SQLite may refresh the timestamp of its shared-memory index file `stash.db-shm`, as any reader does) and makes no network call unless you pass `--check-updates`, which compares the installed version with `npm view`. Each line is `[ok]`, `[warn]`, `[error]` or `[info]`, followed by a fix hint for warnings and errors; `--json` prints the same results as a JSON array and nothing else. The exit code is 1 when any check reports an error and 0 otherwise.
+Read-only diagnostics that tell you whether the install works and what to fix. It checks the Node version, the stash directory and database (schema version, integrity, permissions, leftover recovery files), the MCP registration in Claude Code, Cursor and OpenCode, the context-reset hook, the subagent scope hook, and the `FILESTASH_*` limits. It never creates, changes or deletes any file or setting (when a running server holds the database, SQLite may refresh the timestamp of its shared-memory index file `stash.db-shm`, as any reader does) and makes no network call unless you pass `--check-updates`, which compares the installed version with `npm view`. Each line is `[ok]`, `[warn]`, `[error]` or `[info]`, followed by a fix hint for warnings and errors; `--json` prints the same results as a JSON array and nothing else. The exit code is 1 when any check reports an error and 0 otherwise.
 
 #### `help`
 
@@ -205,7 +213,30 @@ The server answers a repeat read of an unchanged file with a short "unchanged" n
 }
 ```
 
-Limitation: subagents that use the MCP server by name share the parent's server process, so they share its read tracking. A subagent can be told "unchanged" for a file only the parent has seen; have it pass `force=true` on its first read of each file.
+### Subagents
+
+A subagent that uses the MCP server by name shares the parent's server process. Without help, the parent and every subagent share one read tracking: a subagent can be told "unchanged" for a file only the parent has seen, the parent can be told that for a file only a subagent read, and parallel subagents can do it to each other.
+
+`init --hooks` also registers a `PreToolUse` hook that fixes this (or paste it into `~/.claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__(filestash|agent-file-stash)__read_files?",
+        "hooks": [{ "type": "command", "command": "npx agent-file-stash hook subagent-scope" }]
+      }
+    ]
+  }
+}
+```
+
+For a call made by a subagent, Claude Code gives the hook the subagent's `agent_id`, and the hook passes it to the tool as the optional `agent` argument. The server then tracks delivered line ranges per `agent` value: a subagent's first read of a file returns real content, a repeat read by the same subagent is "unchanged", and nothing a subagent reads is counted as delivered to the parent or to another subagent. Calls by the main agent carry no `agent_id` and are left untouched. Token accounting (`stash_status`, the read footer) stays per session.
+
+The hook only adds an argument. It emits no permission decision, so it never grants or bypasses a permission, and a `permissions.deny` rule still blocks the tool. Without the hook, subagents share the parent's tracking as before, and `force=true` on a subagent's first read of each file is the workaround. `doctor` reports a missing hook.
+
+Each session keeps at most 32 `agent` scopes; a read from a new scope beyond that deletes the tracking of the least recently used one, which then gets real content on its next read. Scoped tracking is removed together with its session when that session closes. SDK users pass `scope` to `readFile` and `readFileFull`; a value that is not 1-64 characters of `A-Za-z0-9_.-` is ignored, and session ids must not contain `::`.
 
 ### How sessions work
 
@@ -226,7 +257,7 @@ When a server starts, it prunes closed sessions: any other session whose process
 ### Known limitations
 
 - Clients do not send a per-conversation id, so the server cannot tell that you ran `/clear` or `/compact`. Without the [reset hook](#context-resets) it can answer "unchanged" for content the model no longer has; `force=true` always returns full content.
-- Subagents that use the MCP server by name share the parent's server process and therefore its read tracking.
+- Subagents only get their own read tracking when the [subagent hook](#subagents) is installed; without it they share the parent's.
 - The secret denylist matches on file names only: symlinks are not resolved, so a link with an innocent name pointing at a secret file is stashed, and secrets in files with ordinary names are not detected.
 - Extra patterns in `FILESTASH_EXCLUDE` match basenames only, not directories or full paths.
 - Node.js 24 or later is required (`node:sqlite`).
@@ -375,6 +406,7 @@ packages/
 │
 └── cli/src/
     ├── index.ts      CLI entry point — init, serve, status, reset, help commands
+    ├── hook.ts       The hook subagent-scope command (PreToolUse hook for per-subagent read tracking)
     ├── mcp.ts        MCP server — registers read_file, read_files, stash_status, stash_clear tools
     └── scan.ts       findStashDatabases — locates stash databases for status --all
 
@@ -393,6 +425,7 @@ test/
 ├── session-reset.test.ts resetReads, the reset command, init --hooks, MCP integration
 ├── savings-regression.test.ts  Session accounting identity, savings workload, tool definition overhead
 ├── e2e.test.ts           End-to-end suite with real servers: concurrent servers, crash safety, secrets, path restriction, shutdown
+├── subagent-scope.test.ts  Per-agent read tracking in the SDK, the MCP server, the hook command, init --hooks and doctor
 ├── docs.test.ts          README mentions every CLI command, FILESTASH_* variable and MCP tool
 └── benchmark.ts          Reproducible two-pass simulation across generated TypeScript files (pnpm benchmark)
 ```
@@ -444,7 +477,7 @@ Delete the `"filestash"` key (the one `init` adds; also `"agent-file-stash"` if 
 
 **2. Remove the Claude Code hook**
 
-If you ran `init --hooks` (or pasted the snippet from [Context resets](#context-resets)), remove the `SessionStart` entry whose command is `npx agent-file-stash reset --from-hook` from `~/.claude/settings.json`. `init --hooks` also left a backup of the previous file at `~/.claude/settings.json.bak`, which you can delete.
+If you ran `init --hooks` (or pasted the snippet from [Context resets](#context-resets)), remove the `SessionStart` entry whose command is `npx agent-file-stash reset --from-hook` and the `PreToolUse` entry whose command is `npx agent-file-stash hook subagent-scope` from `~/.claude/settings.json`. `init --hooks` also left a backup of the previous file at `~/.claude/settings.json.bak`, which you can delete.
 
 **3. Remove the stash database**
 

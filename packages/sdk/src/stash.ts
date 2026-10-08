@@ -21,6 +21,7 @@ interface ReadState {
   size: number;
   slice: string;
   midLine: boolean;
+  tid: string;
 }
 
 export const DEFAULT_MAX_LINES = 2000;
@@ -28,6 +29,9 @@ export const DEFAULT_MAX_CHARS = 100_000;
 export const DEFAULT_MAX_STORE_BYTES = 1_000_000;
 export const HARD_MAX_READ_BYTES = 64 * 1024 * 1024;
 const BINARY_SNIFF_CHARS = 8192;
+const SCOPE_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+const SCOPE_DELIMITER = "::";
+export const MAX_SCOPES_PER_SESSION = 32;
 
 interface Snapshot {
   absPath: string;
@@ -167,6 +171,8 @@ async function waitForLockRelease(lockPath: string): Promise<void> {
   while (existsSync(lockPath) && Date.now() < deadline) await sleep(RECOVERY_LOCK_POLL_MS);
 }
 
+const BASE_SESSION_SQL = `(CASE WHEN instr(session_id, '${SCOPE_DELIMITER}') > 0 THEN substr(session_id, 1, instr(session_id, '${SCOPE_DELIMITER}') - 1) ELSE session_id END)`;
+
 function queryOne<T>(db: DatabaseSync, sql: string, params: (string | number)[] = []): T | undefined {
   const rows = db.prepare(sql).all(...params) as T[];
   return rows[0];
@@ -189,7 +195,7 @@ export class StashStore {
 
   constructor(config: StashConfig) {
     this.dbPath = config.dbPath;
-    this.sessionId = config.sessionId;
+    this.sessionId = config.sessionId.replace(/:{2,}/g, "_");
     this.exclude = config.exclude ?? [];
     this.recoverCorrupt = config.recoverCorrupt ?? true;
     this.quiet = config.quiet ?? false;
@@ -331,8 +337,9 @@ export class StashStore {
           db.prepare("DELETE FROM sessions WHERE session_id = ?").run(s.session_id);
         }
       }
-      db.exec("DELETE FROM session_reads WHERE session_id NOT IN (SELECT session_id FROM sessions)");
-      db.exec("DELETE FROM session_ranges WHERE session_id NOT IN (SELECT session_id FROM sessions)");
+      for (const table of ["session_reads", "session_ranges"]) {
+        db.exec(`DELETE FROM ${table} WHERE ${BASE_SESSION_SQL} NOT IN (SELECT session_id FROM sessions)`);
+      }
       db.exec("DELETE FROM session_stats WHERE session_id NOT IN (SELECT session_id FROM sessions)");
       db.exec(
         "DELETE FROM file_versions WHERE NOT EXISTS (SELECT 1 FROM session_reads r WHERE r.path = file_versions.path AND r.hash = file_versions.hash)"
@@ -389,7 +396,7 @@ export class StashStore {
     return snap.size <= this.maxStoreBytes && !isExcludedPath(snap.absPath, this.exclude);
   }
 
-  async readFile(filePath: string, options?: { offset?: number; limit?: number }): Promise<FileReadResult> {
+  async readFile(filePath: string, options?: { offset?: number; limit?: number; scope?: string }): Promise<FileReadResult> {
     await this.init();
 
     const snap = this.readFileSnapshot(filePath);
@@ -413,6 +420,7 @@ export class StashStore {
       size: snap.size,
       slice: slice.text,
       midLine: slice.midLine,
+      tid: this.trackingId(options?.scope),
     };
 
     if (this.db) {
@@ -423,6 +431,24 @@ export class StashStore {
       }
     }
     return this.plainResult(state);
+  }
+
+  private trackingId(scope?: string): string {
+    return scope !== undefined && SCOPE_PATTERN.test(scope) ? `${this.sessionId}${SCOPE_DELIMITER}${scope}` : this.sessionId;
+  }
+
+  private ensureScopeCapacity(db: DatabaseSync, tid: string): void {
+    if (tid === this.sessionId) return;
+    if (queryOne(db, "SELECT 1 FROM session_reads WHERE session_id = ? LIMIT 1", [tid])) return;
+    const prefix = `${this.sessionId}${SCOPE_DELIMITER}`;
+    const scopes = db.prepare(
+      "SELECT session_id, MAX(read_at) AS last FROM session_reads WHERE substr(session_id, 1, ?) = ? GROUP BY session_id ORDER BY last ASC, session_id ASC"
+    ).all(prefix.length, prefix) as { session_id: string }[];
+    const excess = scopes.length - MAX_SCOPES_PER_SESSION + 1;
+    for (const { session_id } of scopes.slice(0, Math.max(0, excess))) {
+      db.prepare("DELETE FROM session_reads WHERE session_id = ?").run(session_id);
+      db.prepare("DELETE FROM session_ranges WHERE session_id = ?").run(session_id);
+    }
   }
 
   private plainResult(s: ReadState): FileReadResult {
@@ -438,10 +464,11 @@ export class StashStore {
 
     const lastRead = queryOne<{ hash: string }>(db,
       "SELECT hash FROM session_reads WHERE session_id = ? AND path = ?",
-      [this.sessionId, state.absPath],
+      [state.tid, state.absPath],
     );
 
     if (!lastRead) {
+      this.ensureScopeCapacity(db, state.tid);
       return this.handleFirstRead(db, state);
     }
 
@@ -458,8 +485,8 @@ export class StashStore {
     this.storeVersion(db, s.absPath, s.currentHash, s.currentContent, s.currentLines, s.now);
     db.prepare(
       "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
-    ).run(this.sessionId, s.absPath, s.currentHash, s.now);
-    this.clearRanges(db, s.absPath);
+    ).run(s.tid, s.absPath, s.currentHash, s.now);
+    this.clearRanges(db, s.tid, s.absPath);
 
     return this.fullSlice(db, s);
   }
@@ -468,41 +495,41 @@ export class StashStore {
     return Math.min(s.rangeEnd, s.currentLines);
   }
 
-  private getRanges(db: DatabaseSync, absPath: string, hash: string): Interval[] {
+  private getRanges(db: DatabaseSync, tid: string, absPath: string, hash: string): Interval[] {
     const rows = db.prepare(
       "SELECT start_line, end_line FROM session_ranges WHERE session_id = ? AND path = ? AND hash = ?"
-    ).all(this.sessionId, absPath, hash) as { start_line: number; end_line: number }[];
+    ).all(tid, absPath, hash) as { start_line: number; end_line: number }[];
     return rows.map((r) => [r.start_line, r.end_line]);
   }
 
   private coversRequest(db: DatabaseSync, s: ReadState, hash: string): boolean {
-    return coversRange(this.getRanges(db, s.absPath, hash), s.rangeStart, this.requestedEnd(s));
+    return coversRange(this.getRanges(db, s.tid, s.absPath, hash), s.rangeStart, this.requestedEnd(s));
   }
 
-  private clearRanges(db: DatabaseSync, absPath: string): void {
-    db.prepare("DELETE FROM session_ranges WHERE session_id = ? AND path = ?").run(this.sessionId, absPath);
+  private clearRanges(db: DatabaseSync, tid: string, absPath: string): void {
+    db.prepare("DELETE FROM session_ranges WHERE session_id = ? AND path = ?").run(tid, absPath);
   }
 
-  private addRange(db: DatabaseSync, absPath: string, hash: string, start: number, end: number): void {
+  private addRange(db: DatabaseSync, tid: string, absPath: string, hash: string, start: number, end: number): void {
     if (end < start) return;
-    const merged = mergeIntervals([...this.getRanges(db, absPath, hash), [start, end]]);
-    db.prepare("DELETE FROM session_ranges WHERE session_id = ? AND path = ? AND hash = ?").run(this.sessionId, absPath, hash);
+    const merged = mergeIntervals([...this.getRanges(db, tid, absPath, hash), [start, end]]);
+    db.prepare("DELETE FROM session_ranges WHERE session_id = ? AND path = ? AND hash = ?").run(tid, absPath, hash);
     const insert = db.prepare(
       "INSERT INTO session_ranges (session_id, path, hash, start_line, end_line) VALUES (?, ?, ?, ?, ?)"
     );
-    for (const [a, b] of merged) insert.run(this.sessionId, absPath, hash, a, b);
+    for (const [a, b] of merged) insert.run(tid, absPath, hash, a, b);
   }
 
   private handleUncovered(db: DatabaseSync, s: ReadState): FileReadResult {
     db.prepare(
       "UPDATE session_reads SET read_at = ? WHERE session_id = ? AND path = ?"
-    ).run(s.now, this.sessionId, s.absPath);
+    ).run(s.now, s.tid, s.absPath);
     return this.fullSlice(db, s);
   }
 
   private fullSlice(db: DatabaseSync, s: ReadState): FileReadResult {
     const content = s.slice;
-    this.addRange(db, s.absPath, s.currentHash, s.rangeStart, this.requestedEnd(s));
+    this.addRange(db, s.tid, s.absPath, s.currentHash, s.rangeStart, this.requestedEnd(s));
     this.recordRead(db, estimateTokens(content), estimateTokens(content));
     return { stashed: false, content, hash: s.currentHash, totalLines: s.currentLines };
   }
@@ -514,7 +541,7 @@ export class StashStore {
     const text = label(saved);
     const sent = estimateTokens(text);
     const base = { stashed: true as const, hash: s.currentHash, totalLines: s.currentLines, linesChanged: 0 };
-    this.addRange(db, s.absPath, s.currentHash, s.rangeStart, this.requestedEnd(s));
+    this.addRange(db, s.tid, s.absPath, s.currentHash, s.rangeStart, this.requestedEnd(s));
     if (sent >= baseline) {
       this.recordRead(db, baseline, baseline);
       return { ...base, content };
@@ -526,7 +553,7 @@ export class StashStore {
   private handleUnchanged(db: DatabaseSync, s: ReadState): FileReadResult {
     db.prepare(
       "UPDATE session_reads SET read_at = ? WHERE session_id = ? AND path = ?"
-    ).run(s.now, this.sessionId, s.absPath);
+    ).run(s.now, s.tid, s.absPath);
 
     return this.unchangedLabel(db, s, (tokens) =>
       s.isPartial
@@ -542,13 +569,13 @@ export class StashStore {
     );
 
     const oldFullyDelivered =
-      !!oldVersion && coversRange(this.getRanges(db, s.absPath, lastHash), 1, oldVersion.lines);
+      !!oldVersion && coversRange(this.getRanges(db, s.tid, s.absPath, lastHash), 1, oldVersion.lines);
 
     this.storeVersion(db, s.absPath, s.currentHash, s.currentContent, s.currentLines, s.now);
     db.prepare(
       "UPDATE session_reads SET hash = ?, read_at = ? WHERE session_id = ? AND path = ?"
-    ).run(s.currentHash, s.now, this.sessionId, s.absPath);
-    this.clearRanges(db, s.absPath);
+    ).run(s.currentHash, s.now, s.tid, s.absPath);
+    this.clearRanges(db, s.tid, s.absPath);
 
     if (oldVersion && oldFullyDelivered) {
       const diffResult = computeDiff(oldVersion.content, s.currentContent, s.absPath);
@@ -577,7 +604,7 @@ export class StashStore {
     const diffTokens = estimateTokens(diffResult.diff);
     if (diffTokens >= contentTokens) return this.fullSlice(db, s);
 
-    this.addRange(db, s.absPath, s.currentHash, 1, s.currentLines);
+    this.addRange(db, s.tid, s.absPath, s.currentHash, 1, s.currentLines);
     this.recordRead(db, contentTokens, diffTokens);
 
     return {
@@ -604,7 +631,7 @@ export class StashStore {
   }
 
   // Resets session tracking for the file and returns the first slice regardless of what was delivered before. Counts as a plain read (baseline equals sent).
-  async readFileFull(filePath: string): Promise<FileReadResult> {
+  async readFileFull(filePath: string, scope?: string): Promise<FileReadResult> {
     await this.init();
 
     const snap = this.readFileSnapshot(filePath);
@@ -617,12 +644,14 @@ export class StashStore {
     try {
       const tokens = estimateTokens(slice.text);
       if (this.isStoreable(snap)) {
+        const tid = this.trackingId(scope);
+        this.ensureScopeCapacity(this.db, tid);
         this.storeVersion(this.db, absPath, hash, content, lines, now);
         this.db.prepare(
           "INSERT OR REPLACE INTO session_reads (session_id, path, hash, read_at) VALUES (?, ?, ?, ?)"
-        ).run(this.sessionId, absPath, hash, now);
-        this.clearRanges(this.db, absPath);
-        this.addRange(this.db, absPath, hash, slice.start, slice.end);
+        ).run(tid, absPath, hash, now);
+        this.clearRanges(this.db, tid, absPath);
+        this.addRange(this.db, tid, absPath, hash, slice.start, slice.end);
       }
       this.recordRead(this.db, tokens, tokens);
     } catch (err) {

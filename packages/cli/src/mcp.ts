@@ -1,5 +1,3 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { createStash, type FileReadResult, type StashStats, type StashStore } from "filestash-sdk";
 import { resolve, join, relative, isAbsolute } from "node:path";
@@ -72,6 +70,7 @@ const readFileShape = {
     .boolean()
     .optional()
     .describe("Bypass stash"),
+  agent: z.string().optional(),
 };
 
 const readFilesShape = {
@@ -79,6 +78,7 @@ const readFilesShape = {
     (val) => (typeof val === "string" ? JSON.parse(val) : val),
     z.array(z.string())
   ).describe("File paths"),
+  agent: z.string().optional(),
 };
 
 export const TOOL_DEFS = {
@@ -163,6 +163,7 @@ async function readSingleFile(
   path: string,
   cwd: string,
   stash: StashStore,
+  scope?: string,
 ): Promise<{ text: string; ok: boolean }> {
   const absPath = resolve(path);
   if (!isPathAllowed(absPath, cwd)) {
@@ -172,7 +173,7 @@ async function readSingleFile(
     };
   }
   try {
-    const result = await stash.readFile(path);
+    const result = await stash.readFile(path, { ...(scope !== undefined && { scope }) });
     return { text: formatFileEntry(path, result), ok: true };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
@@ -208,6 +209,8 @@ export async function startMcpServer(): Promise<void> {
 
   await stash.init();
 
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
   const server = new McpServer({
     name: "filestash",
     version: packageJson.version ?? "0.0.0",
@@ -216,7 +219,7 @@ export async function startMcpServer(): Promise<void> {
   server.registerTool(
     "read_file",
     TOOL_DEFS.read_file,
-    async ({ path, force, offset, limit }) => {
+    async ({ path, force, offset, limit, agent }) => {
       const absPath = resolve(path);
       if (!isPathAllowed(absPath, cwd)) {
         return {
@@ -226,10 +229,11 @@ export async function startMcpServer(): Promise<void> {
       }
       try {
         const result = force
-          ? await stash.readFileFull(path)
+          ? await stash.readFileFull(path, agent)
           : await stash.readFile(path, {
               ...(offset !== undefined && { offset }),
               ...(limit !== undefined && { limit }),
+              ...(agent !== undefined && { scope: agent }),
             });
         let text = formatReadResult(result);
         if (result.stashed) {
@@ -253,8 +257,8 @@ export async function startMcpServer(): Promise<void> {
   server.registerTool(
     "read_files",
     TOOL_DEFS.read_files,
-    async ({ paths }) => {
-      const results = await Promise.all(paths.map(p => readSingleFile(p, cwd, stash)));
+    async ({ paths, agent }) => {
+      const results = await Promise.all(paths.map(p => readSingleFile(p, cwd, stash, agent)));
       const successfulPaths = paths.filter((_, i) => results[i]!.ok);
       const combined = results.map(r => r.text).join("\n\n");
 
