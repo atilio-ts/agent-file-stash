@@ -468,7 +468,7 @@ describe("runner and formatting", () => {
   });
 
   test("the default check list covers every area", () => {
-    expect(CHECKS.map(([id]) => id)).toEqual(["node", "stash-dir", "database", "mcp", "hook", "env", "updates"]);
+    expect(CHECKS.map(([id]) => id)).toEqual(["node", "stash-dir", "database", "mcp", "hook", "hook-subagent-scope", "env", "updates"]);
   });
 });
 
@@ -479,7 +479,7 @@ describe("doctor command", () => {
 
   function configure(c: Case): void {
     writeJson(join(c.home, ".claude.json"), { mcpServers: { filestash: { command: process.execPath, args: ["agent-file-stash", "serve"] } } });
-    writeJson(join(c.home, ".claude", "settings.json"), { hooks: { SessionStart: [{ matcher: "clear|compact", hooks: [{ type: "command", command: "npx agent-file-stash reset --from-hook" }] }] } });
+    writeJson(join(c.home, ".claude", "settings.json"), { hooks: { SessionStart: [{ matcher: "clear|compact", hooks: [{ type: "command", command: "npx agent-file-stash reset --from-hook" }] }], PreToolUse: [{ matcher: "mcp__(filestash|agent-file-stash)__read_files?", hooks: [{ type: "command", command: "npx agent-file-stash hook subagent-scope" }] }] } });
   }
 
   test("healthy setup exits 0 with a summary", () => {
@@ -540,7 +540,7 @@ describe("read-only guarantee", () => {
   function fullCase(): Case {
     const c = newCase();
     writeJson(join(c.home, ".claude.json"), { mcpServers: { filestash: { command: process.execPath, args: ["agent-file-stash", "serve"] } } });
-    writeJson(join(c.home, ".claude", "settings.json"), { hooks: { SessionStart: [{ matcher: "clear|compact", hooks: [{ type: "command", command: "npx agent-file-stash reset --from-hook" }] }] } });
+    writeJson(join(c.home, ".claude", "settings.json"), { hooks: { SessionStart: [{ matcher: "clear|compact", hooks: [{ type: "command", command: "npx agent-file-stash reset --from-hook" }] }], PreToolUse: [{ matcher: "mcp__(filestash|agent-file-stash)__read_files?", hooks: [{ type: "command", command: "npx agent-file-stash hook subagent-scope" }] }] } });
     return c;
   }
 

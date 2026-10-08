@@ -6,6 +6,7 @@ import { startMcpServer, resolveStashDir } from "./mcp.js";
 import { findStashDatabases } from "./scan.js";
 import { editorTargets } from "./editors.js";
 import { runDoctor } from "./doctor.js";
+import { readHookStdin, runSubagentScopeHook } from "./hook.js";
 
 // Suppress the node:sqlite experimental warning before sqlite is dynamically loaded
 const _origEmitWarning = process.emitWarning;
@@ -20,21 +21,18 @@ const RESET_HOOK_ENTRY = {
   matcher: "clear|compact",
   hooks: [{ type: "command", command: RESET_HOOK_COMMAND }],
 };
-const HOOK_STDIN_TIMEOUT_MS = 1000;
+const SCOPE_HOOK_COMMAND = "npx agent-file-stash hook subagent-scope";
+const SCOPE_HOOK_ENTRY = {
+  matcher: "mcp__(filestash|agent-file-stash)__read_files?",
+  hooks: [{ type: "command", command: SCOPE_HOOK_COMMAND }],
+};
 
 function assertHealthy(stash: StashStore): void {
   if (stash.isDegraded) throw new Error(stash.degradedReason);
 }
 
 async function readHookCwd(): Promise<string | undefined> {
-  if (process.stdin.isTTY) return undefined;
-  const read = (async () => {
-    let raw = "";
-    for await (const chunk of process.stdin) raw += chunk;
-    return raw;
-  })();
-  const timeout = new Promise<string>((res) => setTimeout(() => res(""), HOOK_STDIN_TIMEOUT_MS).unref());
-  const raw = (await Promise.race([read, timeout])).trim();
+  const raw = await readHookStdin();
   if (!raw) return undefined;
   try {
     const cwd = (JSON.parse(raw) as { cwd?: unknown })?.cwd;
@@ -69,7 +67,16 @@ async function runReset(fromHook: boolean): Promise<void> {
 }
 
 function hooksSnippet(): string {
-  return JSON.stringify({ hooks: { SessionStart: [RESET_HOOK_ENTRY] } }, null, 2);
+  return JSON.stringify({ hooks: { SessionStart: [RESET_HOOK_ENTRY], PreToolUse: [SCOPE_HOOK_ENTRY] } }, null, 2);
+}
+
+const HOOK_INSTALLS = [
+  { event: "SessionStart", entry: RESET_HOOK_ENTRY },
+  { event: "PreToolUse", entry: SCOPE_HOOK_ENTRY },
+];
+
+function hasHookCommand(entries: unknown, command: string): boolean {
+  return Array.isArray(entries) && entries.some((e: { hooks?: { command?: string }[] }) => e?.hooks?.some((h) => h?.command === command));
 }
 
 function installClaudeHook(home: string): void {
@@ -80,23 +87,27 @@ function installClaudeHook(home: string): void {
     try {
       settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
     } catch {
-      console.error(`  Claude Code hook: ${settingsPath} is not valid JSON, left untouched`);
+      console.error(`  Claude Code hooks: ${settingsPath} is not valid JSON, left untouched`);
       return;
     }
   }
 
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
-  const sessionStart = Array.isArray(hooks.SessionStart) ? (hooks.SessionStart as { hooks?: { command?: string }[] }[]) : [];
-  if (sessionStart.some((e) => e?.hooks?.some((h) => h?.command === RESET_HOOK_COMMAND))) {
-    console.log("  Claude Code hook: already configured");
+  const missing = HOOK_INSTALLS.filter(({ event, entry }) => !hasHookCommand(hooks[event], entry.hooks[0]!.command));
+  if (missing.length === 0) {
+    console.log("  Claude Code hooks: already configured");
     return;
   }
 
   if (existed) copyFileSync(settingsPath, `${settingsPath}.bak`);
   else mkdirSync(join(home, ".claude"), { recursive: true });
-  settings.hooks = { ...hooks, SessionStart: [...sessionStart, RESET_HOOK_ENTRY] };
+  const merged = { ...hooks };
+  for (const { event, entry } of missing) {
+    merged[event] = [...(Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : []), entry];
+  }
+  settings.hooks = merged;
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-  console.log(`  Claude Code hook: configured (${settingsPath})`);
+  console.log(`  Claude Code hooks: configured (${settingsPath})`);
 }
 
 async function runStatus(): Promise<void> {
@@ -221,9 +232,11 @@ function runHelp(): void {
 Usage:
   agent-file-stash init      Auto-configure for your editor
   agent-file-stash init --hooks
-                             Also add the Claude Code context-reset hook to ~/.claude/settings.json
+                             Also add the Claude Code hooks (context reset, subagent read scope) to ~/.claude/settings.json
   agent-file-stash reset     Forget what was read so the next read returns full content
                              (--from-hook: quiet mode for Claude Code hooks)
+  agent-file-stash hook subagent-scope
+                             PreToolUse hook that gives each subagent its own read tracking (no output otherwise)
   agent-file-stash serve     Start the MCP server (default)
   agent-file-stash status    Show stash statistics
   agent-file-stash status --all [dir]
@@ -251,6 +264,8 @@ if (!command || command === "serve") {
   await runInit(process.argv.includes("--hooks"));
 } else if (command === "reset") {
   await runReset(process.argv.includes("--from-hook"));
+} else if (command === "hook" && process.argv[3] === "subagent-scope") {
+  await runSubagentScopeHook();
 } else if (command === "doctor") {
   process.exitCode = await runDoctor(process.argv.slice(3));
 } else if (command === "help" || command === "--help") {

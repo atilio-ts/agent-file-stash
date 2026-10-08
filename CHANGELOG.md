@@ -10,8 +10,13 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 
 ### Added
 
+- Per-agent read tracking for subagents: `read_file` and `read_files` accept an optional `agent` argument, and the new `hook subagent-scope` command is a Claude Code `PreToolUse` hook that fills it with the subagent's id. `init --hooks` now registers it next to the context-reset hook and `doctor` checks it. The SDK `readFile` options and `readFileFull` accept a `scope`. At most 32 scopes are kept per session (least recently used evicted) and scoped tracking is pruned with its session.
 - `doctor` command: read-only diagnostics for the Node version, stash directory and database, MCP registration, context-reset hook and `FILESTASH_*` variables, with fix hints, `--json` output and an opt-in `--check-updates`. Exits 1 when any check reports an error.
 - The database schema is versioned with `PRAGMA user_version` and upgraded by transactional, forward-only migrations that are safe when several servers open the same database. Databases from 0.3.0 to 0.5.0 upgrade in place without data loss. A database created by a newer release is left untouched and the stash degrades with a clear reason.
+
+### Fixed
+
+- A subagent could be told "unchanged" for a file only its parent had read, and the parent or a parallel subagent could be told the same for files read by another agent, because they shared one read tracking. With the subagent hook installed each subagent has its own.
 
 ### Changed
 

@@ -282,8 +282,8 @@ function matcherCovers(matcher: unknown, event: string): boolean {
   }
 }
 
-function commandRunsReset(command: string, o: DoctorOptions): boolean {
-  const mentions = (text: string) => text.includes(PACKAGE_NAME) && /\breset\b/.test(text);
+function commandRuns(command: string, o: DoctorOptions, subcommand: RegExp): boolean {
+  const mentions = (text: string) => text.includes(PACKAGE_NAME) && subcommand.test(text);
   if (mentions(command)) return true;
   const target = command
     .trim()
@@ -325,7 +325,7 @@ export function checkResetHook(o: DoctorOptions): CheckResult[] {
     for (const entry of Array.isArray(sessionStart) ? sessionStart : []) {
       const e = asRecord(entry);
       const hooks = Array.isArray(e?.hooks) ? e.hooks : [];
-      const runs = hooks.some((h) => typeof asRecord(h)?.command === "string" && commandRunsReset(asRecord(h)!.command as string, o));
+      const runs = hooks.some((h) => typeof asRecord(h)?.command === "string" && commandRuns(asRecord(h)!.command as string, o, /\breset\b/));
       if (!runs) continue;
       hookFound = true;
       hookFile ??= file;
@@ -343,6 +343,33 @@ export function checkResetHook(o: DoctorOptions): CheckResult[] {
     out.push(result("hook", "ok", `reset hook configured for clear and compact (${hookFile})`));
   }
   return out;
+}
+
+export function checkSubagentScopeHook(o: DoctorOptions): CheckResult[] {
+  const files = [
+    join(o.home, ".claude", "settings.json"),
+    join(o.cwd, ".claude", "settings.json"),
+    join(o.cwd, ".claude", "settings.local.json"),
+  ];
+  for (const file of files) {
+    if (!existsSync(file)) continue;
+    let settings: unknown;
+    try {
+      settings = readJson(file);
+    } catch {
+      continue;
+    }
+    const preToolUse = asRecord(asRecord(settings)?.hooks)?.PreToolUse;
+    for (const entry of Array.isArray(preToolUse) ? preToolUse : []) {
+      const e = asRecord(entry);
+      const hooks = Array.isArray(e?.hooks) ? e.hooks : [];
+      const runs = hooks.some((h) => typeof asRecord(h)?.command === "string" && commandRuns(asRecord(h)!.command as string, o, /\bhook\s+subagent-scope\b/));
+      if (runs && matcherCovers(e?.matcher, "mcp__filestash__read_file")) {
+        return [result("hook-subagent-scope", "ok", `subagent scope hook configured (${file})`)];
+      }
+    }
+  }
+  return [result("hook-subagent-scope", "warn", "no PreToolUse hook runs 'agent-file-stash hook subagent-scope' for the stash read tools", "run: agent-file-stash init --hooks (without it subagents share read tracking with the main agent)")];
 }
 
 export function checkEnv(): CheckResult[] {
@@ -397,6 +424,7 @@ export const CHECKS: [string, Check][] = [
   ["database", checkDatabase],
   ["mcp", checkMcpRegistration],
   ["hook", checkResetHook],
+  ["hook-subagent-scope", checkSubagentScopeHook],
   ["env", checkEnv],
   ["updates", checkUpdates],
 ];
