@@ -368,7 +368,7 @@ packages/
 │   ├── index.ts      Exports: createStash, StashStore, FileWatcher, computeDiff, isExcludedPath, types
 │   ├── migrations.ts SCHEMA_VERSION and the ordered, transactional schema migrations
 │   ├── stash.ts      StashStore — SQLite-backed content-addressed stash with per-session read tracking and pruning
-│   ├── differ.ts     computeDiff — line-based LCS diff (unified format, LCS capped at 5 000 lines)
+│   ├── differ.ts     computeDiff — line-based Myers diff (unified format, edit distance capped at 2 500 lines)
 │   ├── exclude.ts    isExcludedPath — secret-file denylist and FILESTASH_EXCLUDE patterns
 │   ├── watcher.ts    FileWatcher — debounced fs.watch wrapper that evicts deleted files from the stash
 │   └── types.ts      StashConfig, FileReadResult, StashStats type definitions
@@ -380,11 +380,12 @@ packages/
 
 test/
 ├── smoke.test.ts         End-to-end flows: first read, stash hit, diff on change, partial reads, multi-session isolation
-├── differ.test.ts        Unit tests for computeDiff: add/remove/mixed edits, context lines, LCS size limit
+├── differ.test.ts        Unit tests for computeDiff: add/remove/mixed edits, context lines, edit distance cap
 ├── stash-errors.test.ts  Error paths: missing file, clear(), onFileDeleted(), post-close re-init
 ├── watcher.test.ts       FileWatcher: deletion detection, debounce coalescence, close() cancellation
 ├── mcp-tools.test.ts     Unit tests for isPathAllowed (path traversal guard) and formatReadResult
 ├── mcp-meta.test.ts      Validates the _meta field format and reverse-DNS namespace convention
+├── differ-myers.test.ts  computeDiff against a reference LCS, patch round-trips, edge cases, edit distance cap, speed bounds
 ├── diff-guard.test.ts    Full content is returned when a diff is not smaller than the file
 ├── prune.test.ts         Pruning of closed sessions and their data
 ├── scan.test.ts          findStashDatabases (status --all)
@@ -423,7 +424,7 @@ WAL mode is enabled with a 5-second busy timeout so several servers can share on
 
 **Change detection:** On every read, the current file content is hashed (SHA-256, truncated to 16 hex chars). Same hash = unchanged. Different hash = compute diff, update stash. No polling or watchers required for correctness — the hash is the source of truth. File watchers are optional and only used to proactively evict deleted files.
 
-**Diff algorithm:** Line-based unified diff (`computeDiff`). Groups changed lines into hunks with context lines, in unified format with 3 lines of context. The diff is returned verbatim to the agent, unless it is not smaller than the file, in which case the full content is returned.
+**Diff algorithm:** Line-based unified diff (`computeDiff`). The common leading and trailing lines are trimmed and the rest is diffed with Myers' O(ND) algorithm, so the cost depends on how much changed rather than on file size. Changed lines are grouped into hunks in unified format with 3 lines of context. The diff is returned verbatim to the agent, unless it is not smaller than the file, in which case the full content is returned. When the edit distance exceeds 2 500 changed lines (or the work budget is spent), the differing middle is reported as fully removed and re-added, which in practice makes the guard return the full file; this keeps the diff within a fixed time bound on the single-threaded server.
 
 **Token estimation:** `ceil(characters / 4)`. Rough but directionally correct for code. Used for the token metrics and to decide whether a label or diff is actually shorter than the plain content; it never changes what the file contains.
 

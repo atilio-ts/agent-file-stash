@@ -33,12 +33,12 @@ function numberedLines(n: number, edits: number[] = []): string {
 }
 
 describe("diff size guard", () => {
-  test("file above the LCS limit with scattered edits returns full content", async () => {
+  test("file rewritten beyond the edit-distance cap returns full content", async () => {
     const { stash, file, close } = setup({ maxLines: 100_000, maxChars: 10_000_000 });
     try {
       writeFileSync(file, numberedLines(6000));
       await stash.readFile(file);
-      const edited = numberedLines(6000, [10, 2500, 5900]);
+      const edited = numberedLines(6000, Array.from({ length: 6000 }, (_, i) => i));
       writeFileSync(file, edited);
 
       const result = await stash.readFile(file);

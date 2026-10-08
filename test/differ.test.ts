@@ -68,26 +68,21 @@ describe("computeDiff", () => {
     expect(result.diff).toContain(" line11"); // context after
   });
 
-  test(">5000 lines: LCS skipped, all lines treated as removes + adds", () => {
-    // LCS_LINE_LIMIT = 5000; files with 5001 lines skip LCS entirely
-    const old = Array.from({ length: 5001 }, (_, i) => `line ${i}`).join("\n");
-    const next = Array.from({ length: 5001 }, (_, i) =>
-      i === 2500 ? "CHANGED" : `line ${i}`,
-    ).join("\n");
+  test("edit distance above the cap: all differing lines treated as removes + adds", () => {
+    const old = Array.from({ length: 5001 }, (_, i) => `old ${i}`).join("\n");
+    const next = Array.from({ length: 5001 }, (_, i) => `new ${i}`).join("\n");
     const result = computeDiff(old, next, "f.ts");
     expect(result.hasChanges).toBe(true);
-    // Without LCS, all old lines are removes and all new lines are adds
     expect(result.linesChanged).toBe(5001 + 5001);
   });
 
-  test("exactly 5000 lines: LCS runs, produces minimal diff", () => {
-    // Both files ≤ 5000 lines → LCS is not skipped
+  test("5000 lines: produces minimal diff", () => {
     const base = Array.from({ length: 5000 }, (_, i) => `line ${i}`);
     const modified = [...base];
     modified[2500] = "CHANGED";
     const result = computeDiff(base.join("\n"), modified.join("\n"), "f.ts");
     expect(result.hasChanges).toBe(true);
-    // LCS ran → only the changed line counts, not all 5000
+    // only the changed line counts, not all 5000
     expect(result.linesChanged).toBeLessThan(100);
     expect(result.diff).toContain("-line 2500");
     expect(result.diff).toContain("+CHANGED");
