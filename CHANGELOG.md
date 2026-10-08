@@ -13,6 +13,10 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 - `doctor` command: read-only diagnostics for the Node version, stash directory and database, MCP registration, context-reset hook and `FILESTASH_*` variables, with fix hints, `--json` output and an opt-in `--check-updates`. Exits 1 when any check reports an error.
 - The database schema is versioned with `PRAGMA user_version` and upgraded by transactional, forward-only migrations that are safe when several servers open the same database. Databases from 0.3.0 to 0.5.0 upgrade in place without data loss. A database created by a newer release is left untouched and the stash degrades with a clear reason.
 
+### Changed
+
+- Line diff rewritten with Myers' O(ND) algorithm after trimming the common prefix and suffix, with a hard cap of 2,500 on the edit distance (and a comparison budget) instead of the O(n*m) table and the 5,000-line cut-off. The unified diff format and the line counts are unchanged; past the cap the differing middle is reported as removed and re-added, which makes the diff-size guard return the full file. A diff no longer blocks the server: on a 5,000-line file one edit went from about 300 ms to about 1 ms, and a 20,000-line file from about 49 s to about 3 ms (50,000 lines: about 300 s before, about 6 ms after). At 100,000 lines, 10 scattered edits take about 15 ms, 1,000 scattered edits about 100 ms, and a completely rewritten file about 100 ms.
+
 ## [0.5.0] - 2026-10-07
 
 ### Added
