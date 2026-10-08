@@ -8,6 +8,10 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 
 ## [Unreleased]
 
+### Added
+
+- The database schema is versioned with `PRAGMA user_version` and upgraded by transactional, forward-only migrations that are safe when several servers open the same database. Databases from 0.3.0 to 0.5.0 upgrade in place without data loss. A database created by a newer release is left untouched and the stash degrades with a clear reason.
+
 ## [0.5.0] - 2026-10-07
 
 ### Added

@@ -228,6 +228,7 @@ The stash never prevents a file from being read. If the database or the stash di
 
 - A database that is corrupt (not a database, malformed) is treated as a disposable cache: it is renamed to `stash.db.corrupt-<unix-ms>` next to the original (with any `-wal`/`-shm` files given the same suffix), a fresh database is created, and one line is written to stderr. `stash_status` shows `Recovered: corrupt database moved to <path>`. The renamed file can be deleted. Recovery is attempted once per process and is serialised across processes with a `stash.db.recover.lock` file next to the database, so servers starting together on the same corrupt file recover it once.
 - If the stash directory cannot be created or written, or the database cannot be opened or locked, or any database call fails during a session, the stash switches to degraded mode for the rest of the process: reads return the plain file content, nothing is stashed, and one line is written to stderr with the reason. `stash_status` starts with `Mode: DEGRADED (<reason>) - files are read normally, nothing is stashed`, its metadata carries `degraded` and `degradedReason`, and `stash_clear` reports that there is nothing to clear.
+- A database created by a newer release (its `user_version` is higher than this release knows) is not treated as corrupt and is left untouched: the stash degrades with `database schema version N is newer than this release supports (M); upgrade agent-file-stash`.
 - Errors about the file being read (missing, unreadable, a directory) are still reported as errors.
 - If file watching cannot start (for example the OS watcher limit is reached) or fails later, one line is written to stderr and the server continues without it.
 - `status` and `reset` print a one-line error and exit 1 on an unreadable database (`reset --from-hook` exits 0); `status --all` skips it and continues.
@@ -355,6 +356,7 @@ _Run `pnpm benchmark` to reproduce._
 packages/
 ├── sdk/src/
 │   ├── index.ts      Exports: createStash, StashStore, FileWatcher, computeDiff, isExcludedPath, types
+│   ├── migrations.ts SCHEMA_VERSION and the ordered, transactional schema migrations
 │   ├── stash.ts      StashStore — SQLite-backed content-addressed stash with per-session read tracking and pruning
 │   ├── differ.ts     computeDiff — line-based LCS diff (unified format, LCS capped at 5 000 lines)
 │   ├── exclude.ts    isExcludedPath — secret-file denylist and FILESTASH_EXCLUDE patterns
@@ -404,6 +406,8 @@ The SDK has no external dependencies — it uses only Node.js built-ins (`node:s
 `session_reads` is a lightweight pointer table. Each row is a `(sessionId, path, hash)` triple recording which version of a file a given session last saw. On re-read, the engine joins `session_reads` against `file_versions` to decide what to return: same hash → "unchanged" label; different hash → computed diff; no prior entry → full content. `session_ranges` holds the merged `(start_line, end_line)` intervals the session was given for the hash in `session_reads`. A re-read is answered with the "unchanged" label only when the requested lines fall inside those intervals; otherwise the real lines are returned and the interval is added. A diff or "changes elsewhere" label additionally requires that the whole previous version was delivered. Databases created before this table existed have no range rows, so the first read after upgrading returns real content. This means two agents running in parallel, or an agent reading across a branch switch, each get correct diffs scoped to their own session.
 
 WAL mode is enabled with a 5-second busy timeout so several servers can share one database and readers do not block the writer.
+
+**Schema versioning:** the schema version is stored in SQLite's `PRAGMA user_version` (currently 1; a database with version 0 is a legacy one created before versioning and is completed with any missing table or index). On open, each pending migration runs in its own `BEGIN IMMEDIATE` transaction that also bumps `user_version`, and servers opening the same database at once re-read the version inside the transaction, so each migration is applied once. Migrations are forward-only and additive when possible; there is no downgrade. A database whose version is newer than the release supports is never modified: the server enters [degraded mode](#degraded-mode) with `database schema version N is newer than this release supports (M); upgrade agent-file-stash`.
 
 **Pruning:** on startup each server deletes sessions whose pid is no longer alive, their read pointers, delivered ranges and counters, and any `file_versions` row no remaining session points at. Rows for paths matching the secret denylist are removed at the same time. See [How sessions work](#how-sessions-work).
 

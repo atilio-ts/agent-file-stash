@@ -4,55 +4,8 @@ import { resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { computeDiff, type DiffResult } from "./differ.js";
 import { isExcludedPath } from "./exclude.js";
+import { runMigrations } from "./migrations.js";
 import type { StashConfig, StashStats, FileReadResult } from "./types.js";
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS file_versions (
-  path        TEXT NOT NULL,
-  hash        TEXT NOT NULL,
-  content     TEXT NOT NULL,
-  lines       INTEGER NOT NULL,
-  created_at  INTEGER NOT NULL,
-  PRIMARY KEY (path, hash)
-);
-
-CREATE TABLE IF NOT EXISTS session_reads (
-  session_id  TEXT NOT NULL,
-  path        TEXT NOT NULL,
-  hash        TEXT NOT NULL,
-  read_at     INTEGER NOT NULL,
-  PRIMARY KEY (session_id, path)
-);
-
-CREATE TABLE IF NOT EXISTS session_ranges (
-  session_id  TEXT NOT NULL,
-  path        TEXT NOT NULL,
-  hash        TEXT NOT NULL,
-  start_line  INTEGER NOT NULL,
-  end_line    INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_session_ranges ON session_ranges (session_id, path);
-
-CREATE TABLE IF NOT EXISTS sessions (
-  session_id  TEXT PRIMARY KEY,
-  pid         INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS stats (
-  key   TEXT PRIMARY KEY,
-  value INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS session_stats (
-  session_id  TEXT NOT NULL,
-  key         TEXT NOT NULL,
-  value       INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (session_id, key)
-);
-
-INSERT OR IGNORE INTO stats (key, value) VALUES ('tokens_saved', 0);
-`;
 
 interface ReadState {
   absPath: string;
@@ -281,7 +234,7 @@ export class StashStore {
     try {
       db.exec("PRAGMA busy_timeout=5000");
       db.exec("PRAGMA journal_mode=WAL");
-      db.exec(SCHEMA);
+      runMigrations(db);
       this.registerSession(db);
       this.pruneClosedSessions(db);
     } catch (err) {

@@ -39,6 +39,14 @@ pnpm benchmark
 
 This runs a reproducible simulation of the two-pass read workflow described in the README. Results are averaged over 5 runs per scenario.
 
+## Changing the schema
+
+The database schema is versioned with `PRAGMA user_version`; migrations live in `packages/sdk/src/migrations.ts`.
+
+1. Append a migration with the next version number to `MIGRATIONS`. It runs inside a transaction that also bumps `user_version`; prefer additive changes (`CREATE ... IF NOT EXISTS`, `ADD COLUMN`) and never edit a shipped migration.
+2. `SCHEMA_VERSION` follows the last entry; keep the fresh-database schema equal to the upgraded one.
+3. Add a fixture of the previous schema and a test to `test/schema-versioning.test.ts` that upgrades it and checks the data survives.
+
 ## Releasing
 
 Only the root package `agent-file-stash` is published; `packages/sdk` and `packages/cli` are private workspace packages bundled into it, and their versions are not bumped.
