@@ -5,7 +5,7 @@ export {
   DEFAULT_MAX_STORE_BYTES,
   HARD_MAX_READ_BYTES,
 } from "./stash.js";
-export { SCHEMA_VERSION } from "./migrations.js";
+export { SCHEMA_VERSION, SchemaTooNewError } from "./migrations.js";
 export { FileWatcher } from "./watcher.js";
 export { computeDiff } from "./differ.js";
 export { isExcludedPath } from "./exclude.js";
