@@ -8,6 +8,8 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-08
+
 ### Added
 
 - Per-agent read tracking for subagents: `read_file` and `read_files` accept an optional `agent` argument, and the new `hook subagent-scope` command is a Claude Code `PreToolUse` hook that fills it with the subagent's id. `init --hooks` now registers it next to the context-reset hook and `doctor` checks it. The SDK `readFile` options and `readFileFull` accept a `scope`. At most 32 scopes are kept per session (least recently used evicted) and scoped tracking is pruned with its session.
