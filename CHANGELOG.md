@@ -8,6 +8,8 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-08
+
 ### Added
 
 - Lifetime usage counters (sessions, reads, plain-read baseline tokens, tokens sent and estimated tool-definition overhead) kept in the existing `stats` table, so they survive the pruning of closed sessions. `status`, `status --all` and `stash_status` print a lifetime block with gross saved, net saved and net saved per session, and the `stash_status` `_meta` stats gain the same figures. Counting starts at the upgrade; `stash_clear` resets the counters. The SDK adds `StashStore.recordSessionStart`, the `lifetime*` fields of `StashStats` and the `lifetimeView` helper.
