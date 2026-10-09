@@ -8,6 +8,8 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-09
+
 ### Added
 
 - Oh My Pi support: `init` registers the server in `~/.omp/agent/mcp.json` and `doctor` checks that registration. `init --hooks` also installs the extension `~/.omp/agent/extensions/agent-file-stash.ts`, which gives each Oh My Pi subagent its own read tracking and resets tracking on `/compact` and session switch. `doctor` gains the `hook-oh-my-pi` check.

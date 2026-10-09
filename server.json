@@ -6,12 +6,12 @@
     "url": "https://github.com/atilio-ts/agent-file-stash",
     "source": "github"
   },
-  "version": "0.6.1",
+  "version": "0.7.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "agent-file-stash",
-      "version": "0.6.1",
+      "version": "0.7.0",
       "transport": {
         "type": "stdio"
       }
