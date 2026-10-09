@@ -356,6 +356,20 @@ filestash status:
   Gross saved (all sessions): ~53,851 tokens
 ```
 
+Session counters are discarded when a closed session is pruned, so the status also keeps lifetime counters in the database: sessions, reads, what plain reads would have returned, what the stash returned, and the estimated tool-definition overhead of every session. `agent-file-stash status`, `status --all` (summed over every database found) and `stash_status` print them as a block:
+
+```
+  Lifetime (since 2026-10-09):
+    Sessions: 14, reads: 312
+    Would have sent (plain reads): ~410,200 tokens
+    Actually sent: ~188,900 tokens
+    Gross saved: ~221,300 tokens
+    Tool definitions overhead: ~3,878 tokens (est., 14 sessions)
+    Net saved: ~217,422 tokens (est.), ~15,530 per session
+```
+
+Net is gross saved minus the overhead of every counted session, so it shows whether the stash pays for its tool definitions on average; it can be negative. A session is counted once, when the MCP server starts; `status`, `reset` and `doctor` never count one. Counting starts when you upgrade to the release that introduced it, so on an older database `Gross saved (all sessions)` includes history the lifetime block does not, and the block is replaced by a note until the first session is counted. The overhead is an estimate (`ceil(characters / 4)` of the tool definitions), not a measurement. `stash_clear` resets the lifetime counters together with the other totals.
+
 ## Benchmark
 
 Tested on a real 268-file TypeScript codebase ([opencode](https://github.com/sst/opencode)) — same agent, same prompt, only the stash toggled:

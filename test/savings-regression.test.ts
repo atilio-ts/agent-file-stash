@@ -168,6 +168,11 @@ describe("tool definition overhead", () => {
       sessionReads: 3,
       sessionBaselineTokens: 40,
       sessionSentTokens: 30,
+      lifetimeSessions: 0,
+      lifetimeReads: 0,
+      lifetimeBaselineTokens: 0,
+      lifetimeSentTokens: 0,
+      lifetimeOverheadTokens: 0,
       degraded: false,
     };
     const text = formatStatus(stats, 100);

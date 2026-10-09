@@ -51,6 +51,15 @@ interface Slice {
   truncated: boolean;
 }
 
+const LIFETIME_KEYS = [
+  "reads_total",
+  "baseline_tokens_total",
+  "sent_tokens_total",
+  "sessions_total",
+  "overhead_tokens_total",
+  "counters_since",
+];
+
 function positiveOr(value: number | undefined, fallback: number): number {
   return Number.isInteger(value) && value! > 0 ? value! : fallback;
 }
@@ -192,6 +201,7 @@ export class StashStore {
   private recoveryAttempted = false;
   private recoveredFrom: string | undefined;
   private reason: string | undefined;
+  private sessionCounted = false;
 
   constructor(config: StashConfig) {
     this.dbPath = config.dbPath;
@@ -689,6 +699,9 @@ export class StashStore {
       const sessionStat = (key: string) =>
         queryOne<{ value: number }>(db, "SELECT value FROM session_stats WHERE session_id = ? AND key = ?", [this.sessionId, key])?.value ?? 0;
 
+      const lifetime = (key: string) => queryOne<{ value: number }>(db, "SELECT value FROM stats WHERE key = ?", [key])?.value ?? 0;
+      const since = queryOne<{ value: number }>(db, "SELECT value FROM stats WHERE key = 'counters_since'")?.value;
+
       return {
         filesTracked: versionRow?.c ?? 0,
         tokensSaved: tokenRow?.value ?? 0,
@@ -696,6 +709,12 @@ export class StashStore {
         sessionReads: sessionStat("reads"),
         sessionBaselineTokens: sessionStat("baseline_tokens"),
         sessionSentTokens: sessionStat("sent_tokens"),
+        lifetimeSessions: lifetime("sessions_total"),
+        lifetimeReads: lifetime("reads_total"),
+        lifetimeBaselineTokens: lifetime("baseline_tokens_total"),
+        lifetimeSentTokens: lifetime("sent_tokens_total"),
+        lifetimeOverheadTokens: lifetime("overhead_tokens_total"),
+        ...(since !== undefined && since > 0 && { countersSince: since }),
         degraded: false,
         ...(this.recoveredFrom && { recoveredFrom: this.recoveredFrom }),
       };
@@ -709,6 +728,11 @@ export class StashStore {
       sessionReads: 0,
       sessionBaselineTokens: 0,
       sessionSentTokens: 0,
+      lifetimeSessions: 0,
+      lifetimeReads: 0,
+      lifetimeBaselineTokens: 0,
+      lifetimeSentTokens: 0,
+      lifetimeOverheadTokens: 0,
       degraded: true,
       ...(this.reason && { degradedReason: this.reason }),
     };
@@ -722,6 +746,7 @@ export class StashStore {
       db.prepare("DELETE FROM session_ranges").run();
       db.prepare("DELETE FROM session_stats").run();
       db.prepare("UPDATE stats SET value = 0").run();
+      db.prepare(`DELETE FROM stats WHERE key IN (${LIFETIME_KEYS.map(() => "?").join(", ")})`).run(...LIFETIME_KEYS);
     });
   }
 
@@ -754,6 +779,21 @@ export class StashStore {
     this.bumpSessionStat(db, "baseline_tokens", baseline);
     this.bumpSessionStat(db, "sent_tokens", sent);
     if (baseline > sent) this.addTokensSaved(db, baseline - sent);
+    this.bumpLifetime(db, { reads_total: 1, baseline_tokens_total: baseline, sent_tokens_total: sent });
+  }
+
+  private bumpLifetime(db: DatabaseSync, counters: Record<string, number>): void {
+    db.prepare("INSERT OR IGNORE INTO stats (key, value) VALUES ('counters_since', ?)").run(Date.now());
+    const bump = db.prepare("INSERT INTO stats (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = value + ?");
+    for (const [key, n] of Object.entries(counters)) bump.run(key, n, n);
+  }
+
+  async recordSessionStart(overheadTokens: number): Promise<void> {
+    await this.init();
+    if (this.sessionCounted) return;
+    this.sessionCounted = true;
+    const overhead = Number.isFinite(overheadTokens) && overheadTokens > 0 ? Math.round(overheadTokens) : 0;
+    this.guarded((db) => this.bumpLifetime(db, { sessions_total: 1, overhead_tokens_total: overhead }));
   }
 
   private bumpSessionStat(db: DatabaseSync, key: string, n: number): void {

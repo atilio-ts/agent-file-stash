@@ -328,7 +328,7 @@ describe("concurrent upgrade", () => {
     db.exec(`
       DELETE FROM stats;
       CREATE TABLE audit (n INTEGER);
-      CREATE TRIGGER log_seed BEFORE INSERT ON stats BEGIN INSERT INTO audit VALUES (1); END;
+      CREATE TRIGGER log_seed BEFORE INSERT ON stats WHEN NEW.key = 'tokens_saved' BEGIN INSERT INTO audit VALUES (1); END;
     `);
     db.close();
 
