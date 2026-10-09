@@ -8,6 +8,8 @@ Dates are taken from git history. Versions 0.3.0 and 0.4.0 have no git tag; thei
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-09
+
 ### Fixed
 
 - `init --hooks` no longer adds a second hook when the context-reset or subagent scope hook already runs through a wrapper script or another command form; it uses the same detection as `doctor`.
