@@ -57,6 +57,18 @@ export interface StashStats {
   sessionBaselineTokens: number;
   /** Tokens actually returned by the stash in this session */
   sessionSentTokens: number;
+  /** Sessions counted since the lifetime counters started */
+  lifetimeSessions: number;
+  /** Reads served since the lifetime counters started */
+  lifetimeReads: number;
+  /** Tokens plain reads would have returned since the lifetime counters started */
+  lifetimeBaselineTokens: number;
+  /** Tokens actually returned since the lifetime counters started */
+  lifetimeSentTokens: number;
+  /** Estimated tool-definition tokens paid by the counted sessions */
+  lifetimeOverheadTokens: number;
+  /** Unix ms when the lifetime counters were first written */
+  countersSince?: number;
   /** True when the stash is unavailable and files are read without it */
   degraded: boolean;
   /** Why the stash is unavailable */

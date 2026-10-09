@@ -8,6 +8,8 @@ export {
 export { SCHEMA_VERSION, SchemaTooNewError } from "./migrations.js";
 export { FileWatcher } from "./watcher.js";
 export { computeDiff } from "./differ.js";
+export { lifetimeView } from "./lifetime.js";
+export type { LifetimeView, LifetimeCounters } from "./lifetime.js";
 export { isExcludedPath } from "./exclude.js";
 export type { StashConfig, StashStats, FileReadResult } from "./types.js";
 

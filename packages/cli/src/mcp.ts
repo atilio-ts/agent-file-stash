@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createStash, type FileReadResult, type StashStats, type StashStore } from "filestash-sdk";
+import { createStash, lifetimeView, type FileReadResult, type LifetimeCounters, type StashStats, type StashStore } from "filestash-sdk";
 import { resolve, join, relative, isAbsolute } from "node:path";
 import { readFileSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -137,6 +137,23 @@ function degradedLine(reason = "unknown"): string {
   return `Mode: DEGRADED (${reason}) - files are read normally, nothing is stashed`;
 }
 
+export function formatLifetime(c: LifetimeCounters, since: number | undefined, saved: string): string[] {
+  const v = lifetimeView(c);
+  if (v.empty) return [`  Lifetime counters start with this version; ${saved} above includes older history.`];
+  const fmt = (n: number) => `~${n.toLocaleString()}`;
+  const date = since ? ` (since ${new Date(since).toISOString().slice(0, 10)})` : "";
+  const perSession = v.netPerSession === null ? "" : `, ${fmt(v.netPerSession)} per session`;
+  return [
+    `  Lifetime${date}:`,
+    `    Sessions: ${v.sessions}, reads: ${v.reads}`,
+    `    Would have sent (plain reads): ${fmt(v.baselineTokens)} tokens`,
+    `    Actually sent: ${fmt(v.sentTokens)} tokens`,
+    `    Gross saved: ${fmt(v.grossSaved)} tokens`,
+    `    Tool definitions overhead: ${fmt(v.overheadTokens)} tokens (est., ${v.sessions} sessions)`,
+    `    Net saved: ${fmt(v.netSaved)} tokens (est.)${perSession}`,
+  ];
+}
+
 export function formatStatus(stats: StashStats, overheadTokens: number): string {
   if (stats.degraded) return degradedLine(stats.degradedReason);
   const fmt = (n: number) => `~${n.toLocaleString()}`;
@@ -152,6 +169,7 @@ export function formatStatus(stats: StashStats, overheadTokens: number): string 
     `    Tool definitions overhead: ${fmt(overheadTokens)} tokens (est.)`,
     `    Net saved: ${fmt(net)} tokens (est.)`,
     `  Gross saved (all sessions): ${fmt(stats.tokensSaved)} tokens`,
+    ...formatLifetime(stats, stats.countersSince, `"Gross saved (all sessions)"`),
   ].join("\n");
 }
 
@@ -208,6 +226,7 @@ export async function startMcpServer(): Promise<void> {
   });
 
   await stash.init();
+  await stash.recordSessionStart(toolDefinitionTokens());
 
   const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
   const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
@@ -293,6 +312,7 @@ export async function startMcpServer(): Promise<void> {
             ...stats,
             toolDefinitionTokens: overhead,
             netTokensSaved: stats.sessionTokensSaved - overhead,
+            lifetime: lifetimeView(stats),
           },
         },
       };

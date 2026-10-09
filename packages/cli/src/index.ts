@@ -1,8 +1,8 @@
-import { createStash, type StashStore } from "filestash-sdk";
+import { createStash, type LifetimeCounters, type StashStore } from "filestash-sdk";
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { startMcpServer, resolveStashDir } from "./mcp.js";
+import { startMcpServer, resolveStashDir, formatLifetime } from "./mcp.js";
 import { findStashDatabases } from "./scan.js";
 import { editorTargets } from "./editors.js";
 import { runDoctor } from "./doctor.js";
@@ -129,6 +129,7 @@ async function runStatus(): Promise<void> {
     console.log(`filestash status:`);
     console.log(`  Files tracked:          ${stats.filesTracked}`);
     console.log(`  Tokens saved (total):   ~${stats.tokensSaved.toLocaleString()}`);
+    console.log(formatLifetime(stats, stats.countersSince, `"Tokens saved (total)"`).join("\n"));
   } catch (e: unknown) {
     console.error(`filestash status failed for ${dbPath}: ${e instanceof Error ? e.message : String(e)}`);
     process.exitCode = 1;
@@ -145,12 +146,20 @@ async function runStatusAll(root: string): Promise<void> {
   }
 
   const rows: { project: string; files: number; tokens: number }[] = [];
+  const lifetime: LifetimeCounters = { lifetimeSessions: 0, lifetimeReads: 0, lifetimeBaselineTokens: 0, lifetimeSentTokens: 0, lifetimeOverheadTokens: 0 };
+  let since: number | undefined;
   for (const dbPath of databases) {
     const { stash } = createStash({ dbPath, sessionId: CLI_STATUS_SESSION, recoverCorrupt: false, quiet: true });
     try {
       await stash.init();
       const stats = await stash.getStats();
       assertHealthy(stash);
+      lifetime.lifetimeSessions += stats.lifetimeSessions;
+      lifetime.lifetimeReads += stats.lifetimeReads;
+      lifetime.lifetimeBaselineTokens += stats.lifetimeBaselineTokens;
+      lifetime.lifetimeSentTokens += stats.lifetimeSentTokens;
+      lifetime.lifetimeOverheadTokens += stats.lifetimeOverheadTokens;
+      if (stats.countersSince !== undefined) since = Math.min(since ?? Infinity, stats.countersSince);
       rows.push({ project: resolve(dbPath, "../..").replace(/\/\.vscode$/, ""), files: stats.filesTracked, tokens: stats.tokensSaved });
     } catch (e: unknown) {
       console.error(`  skipped ${dbPath}: ${e instanceof Error ? e.message : String(e)}`);
@@ -168,6 +177,7 @@ async function runStatusAll(root: string): Promise<void> {
     console.log(`  ~${r.tokens.toLocaleString().padStart(10)} tokens  ${String(r.files).padStart(5)} files  ${r.project}`);
   }
   console.log(`  ~${totalTokens.toLocaleString().padStart(10)} tokens  ${String(totalFiles).padStart(5)} files  TOTAL`);
+  console.log(formatLifetime(lifetime, since, "the per-project totals").join("\n"));
   console.log(`\nSavings count re-reads within a session (unchanged files and diffs); a new session always receives full content.`);
 }
 
