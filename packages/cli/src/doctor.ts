@@ -273,7 +273,7 @@ export function checkMcpRegistration(o: DoctorOptions): CheckResult[] {
   return out;
 }
 
-function matcherCovers(matcher: unknown, event: string): boolean {
+export function matcherCovers(matcher: unknown, event: string): boolean {
   if (matcher === undefined || matcher === "" || matcher === "*") return true;
   if (typeof matcher !== "string") return false;
   try {
@@ -283,7 +283,7 @@ function matcherCovers(matcher: unknown, event: string): boolean {
   }
 }
 
-function commandRuns(command: string, o: DoctorOptions, subcommand: RegExp): boolean {
+export function commandRuns(command: string, o: Pick<DoctorOptions, "home" | "cwd">, subcommand: RegExp): boolean {
   const mentions = (text: string) => text.includes(PACKAGE_NAME) && subcommand.test(text);
   if (mentions(command)) return true;
   const target = command

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { startMcpServer, resolveStashDir, formatLifetime } from "./mcp.js";
 import { findStashDatabases } from "./scan.js";
 import { editorTargets } from "./editors.js";
-import { runDoctor } from "./doctor.js";
+import { commandRuns, matcherCovers, runDoctor } from "./doctor.js";
 import { readHookStdin, runSubagentScopeHook } from "./hook.js";
 import { OMP_AGENT_DIR, OMP_EXTENSION_SOURCE, ompExtensionPath } from "./omp-extension.js";
 
@@ -72,12 +72,17 @@ function hooksSnippet(): string {
 }
 
 const HOOK_INSTALLS = [
-  { event: "SessionStart", entry: RESET_HOOK_ENTRY },
-  { event: "PreToolUse", entry: SCOPE_HOOK_ENTRY },
+  { event: "SessionStart", entry: RESET_HOOK_ENTRY, subcommand: /\breset\b/, targets: ["clear", "compact"] },
+  { event: "PreToolUse", entry: SCOPE_HOOK_ENTRY, subcommand: /\bhook\s+subagent-scope\b/, targets: ["mcp__filestash__read_file"] },
 ];
 
-function hasHookCommand(entries: unknown, command: string): boolean {
-  return Array.isArray(entries) && entries.some((e: { hooks?: { command?: string }[] }) => e?.hooks?.some((h) => h?.command === command));
+function hasHook(entries: unknown, install: (typeof HOOK_INSTALLS)[number], home: string): boolean {
+  if (!Array.isArray(entries)) return false;
+  const runs = (e: { matcher?: unknown; hooks?: { command?: unknown }[] }, target: string) =>
+    matcherCovers(e?.matcher, target) &&
+    Array.isArray(e?.hooks) &&
+    e.hooks.some((h) => typeof h?.command === "string" && commandRuns(h.command, { home, cwd: process.cwd() }, install.subcommand));
+  return install.targets.every((target) => entries.some((e) => runs(e, target)));
 }
 
 function installClaudeHook(home: string): void {
@@ -94,7 +99,7 @@ function installClaudeHook(home: string): void {
   }
 
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
-  const missing = HOOK_INSTALLS.filter(({ event, entry }) => !hasHookCommand(hooks[event], entry.hooks[0]!.command));
+  const missing = HOOK_INSTALLS.filter((install) => !hasHook(hooks[install.event], install, home));
   if (missing.length === 0) {
     console.log("  Claude Code hooks: already configured");
     return;

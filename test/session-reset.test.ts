@@ -294,6 +294,51 @@ describe("init hooks", () => {
     expect(readFileSync(settingsPath, "utf-8")).toBe("{broken");
     expect(existsSync(`${settingsPath}.bak`)).toBe(false);
   });
+
+  function writeScript(home: string, name: string, body: string): string {
+    const dir = join(home, ".claude", "hooks");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, name);
+    writeFileSync(path, body);
+    return path;
+  }
+
+  test("recognizes hooks that run through wrapper scripts and adds nothing", () => {
+    const home = newHome();
+    const reset = writeScript(home, "reset.sh", "#!/usr/bin/env bash\nexec agent-file-stash reset --from-hook\n");
+    const scope = writeScript(home, "scope.sh", "#!/usr/bin/env bash\nexec agent-file-stash hook subagent-scope\n");
+    const settingsPath = join(home, ".claude", "settings.json");
+    const text = JSON.stringify({
+      hooks: {
+        SessionStart: [{ matcher: "clear|compact", hooks: [{ type: "command", command: `bash ${reset}` }] }],
+        PreToolUse: [{ matcher: "mcp__(filestash|agent-file-stash)__read_files?", hooks: [{ type: "command", command: `bash ${scope}` }] }],
+      },
+    }, null, 2);
+    writeFileSync(settingsPath, text);
+    const res = runCli(["init", "--hooks"], { env: { HOME: home, XDG_CONFIG_HOME: join(home, ".config") } });
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("Claude Code hooks: already configured");
+    expect(readFileSync(settingsPath, "utf-8")).toBe(text);
+    expect(existsSync(`${settingsPath}.bak`)).toBe(false);
+  });
+
+  test("adds only the hook that is missing or does not cover clear and compact", () => {
+    const home = newHome();
+    const scope = writeScript(home, "scope.sh", "#!/usr/bin/env bash\nexec agent-file-stash hook subagent-scope\n");
+    const other = writeScript(home, "other.sh", "#!/usr/bin/env bash\necho hi\n");
+    const settingsPath = join(home, ".claude", "settings.json");
+    writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        SessionStart: [{ matcher: "clear", hooks: [{ type: "command", command: "npx agent-file-stash reset --from-hook" }] }, { hooks: [{ type: "command", command: `bash ${other}` }] }],
+        PreToolUse: [{ matcher: "mcp__(filestash|agent-file-stash)__read_files?", hooks: [{ type: "command", command: `bash ${scope}` }] }],
+      },
+    }));
+    expect(runCli(["init", "--hooks"], { env: { HOME: home, XDG_CONFIG_HOME: join(home, ".config") } }).status).toBe(0);
+    const after = settingsOf(home);
+    expect(after.hooks.PreToolUse).toHaveLength(1);
+    expect(after.hooks.SessionStart).toHaveLength(3);
+    expect(after.hooks.SessionStart[2]).toEqual({ matcher: "clear|compact", hooks: [{ type: "command", command: hookCommand }] });
+  });
 });
 
 describe("MCP server integration", () => {
