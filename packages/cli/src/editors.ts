@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { OMP_AGENT_DIR } from "./omp-extension.js";
 
 export interface EditorTarget {
   name: string;
@@ -24,5 +25,6 @@ export function editorTargets(home: string): EditorTarget[] {
     { name: "Claude Code", path: join(home, ".claude.json"), key: "mcpServers", entry: mcpServersEntry },
     { name: "Cursor", path: join(home, ".cursor", "mcp.json"), key: "mcpServers", entry: mcpServersEntry },
     { name: "OpenCode", path: join(xdgConfig, "opencode", "opencode.json"), key: "mcp", entry: opencodeMcpEntry },
+    { name: "Oh My Pi", path: join(OMP_AGENT_DIR(home), "mcp.json"), key: "mcpServers", entry: mcpServersEntry },
   ];
 }

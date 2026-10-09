@@ -7,6 +7,7 @@ import { findStashDatabases } from "./scan.js";
 import { editorTargets } from "./editors.js";
 import { runDoctor } from "./doctor.js";
 import { readHookStdin, runSubagentScopeHook } from "./hook.js";
+import { OMP_AGENT_DIR, OMP_EXTENSION_SOURCE, ompExtensionPath } from "./omp-extension.js";
 
 // Suppress the node:sqlite experimental warning before sqlite is dynamically loaded
 const _origEmitWarning = process.emitWarning;
@@ -108,6 +109,19 @@ function installClaudeHook(home: string): void {
   settings.hooks = merged;
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   console.log(`  Claude Code hooks: configured (${settingsPath})`);
+}
+
+function installOmpExtension(home: string): void {
+  if (!existsSync(OMP_AGENT_DIR(home))) return;
+  const path = ompExtensionPath(home);
+  if (existsSync(path)) {
+    const current = readFileSync(path, "utf-8");
+    console.log(current === OMP_EXTENSION_SOURCE ? "  Oh My Pi extension: already configured" : `  Oh My Pi extension: ${path} differs from the bundled one, left untouched`);
+    return;
+  }
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, OMP_EXTENSION_SOURCE);
+  console.log(`  Oh My Pi extension: configured (${path})`);
 }
 
 async function runStatus(): Promise<void> {
@@ -230,9 +244,11 @@ async function runInit(withHooks: boolean): Promise<void> {
   console.log(`\nContext resets: after /clear or /compact the model loses file contents the stash still considers read.`);
   if (withHooks) {
     installClaudeHook(home);
+    installOmpExtension(home);
   } else {
     console.log(`Add this to ~/.claude/settings.json (or re-run 'init --hooks' to merge it):\n`);
     console.log(hooksSnippet());
+    if (existsSync(OMP_AGENT_DIR(home))) console.log(`\nFor Oh My Pi, re-run 'init --hooks' to install the extension (context reset, subagent read scope) in ${ompExtensionPath(home)}.`);
   }
 }
 
@@ -243,6 +259,7 @@ Usage:
   agent-file-stash init      Auto-configure for your editor
   agent-file-stash init --hooks
                              Also add the Claude Code hooks (context reset, subagent read scope) to ~/.claude/settings.json
+                             and the Oh My Pi extension to ~/.omp/agent/extensions/
   agent-file-stash reset     Forget what was read so the next read returns full content
                              (--from-hook: quiet mode for Claude Code hooks)
   agent-file-stash hook subagent-scope
