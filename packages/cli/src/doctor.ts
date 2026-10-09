@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { resolveStashDir } from "./mcp.js";
 import { editorTargets } from "./editors.js";
+import { OMP_AGENT_DIR, ompExtensionPath } from "./omp-extension.js";
 
 export type Status = "ok" | "warn" | "error" | "info";
 
@@ -268,7 +269,7 @@ export function checkMcpRegistration(o: DoctorOptions): CheckResult[] {
       out.push(result(id, "ok", `${t.name}: filestash registered in ${t.path}`));
     }
   }
-  if (found === 0) return [result("mcp", "info", "no editor configuration found (Claude Code, Cursor, OpenCode)")];
+  if (found === 0) return [result("mcp", "info", "no editor configuration found (Claude Code, Cursor, OpenCode, Oh My Pi)")];
   return out;
 }
 
@@ -372,6 +373,15 @@ export function checkSubagentScopeHook(o: DoctorOptions): CheckResult[] {
   return [result("hook-subagent-scope", "warn", "no PreToolUse hook runs 'agent-file-stash hook subagent-scope' for the stash read tools", "run: agent-file-stash init --hooks (without it subagents share read tracking with the main agent)")];
 }
 
+export function checkOhMyPiExtension(o: DoctorOptions): CheckResult[] {
+  if (!existsSync(OMP_AGENT_DIR(o.home))) return [];
+  const path = ompExtensionPath(o.home);
+  const hint = "run: agent-file-stash init --hooks (without it Oh My Pi subagents share read tracking with the main agent and a read after /compact can come back as unchanged)";
+  if (!existsSync(path)) return [result("hook-oh-my-pi", "warn", "no agent-file-stash extension in Oh My Pi", hint)];
+  if (!readFileSync(path, "utf-8").includes(PACKAGE_NAME)) return [result("hook-oh-my-pi", "warn", `${path} does not run agent-file-stash`, hint)];
+  return [result("hook-oh-my-pi", "ok", `Oh My Pi extension configured (${path})`)];
+}
+
 export function checkEnv(): CheckResult[] {
   const out: CheckResult[] = [];
   const exclude = process.env.FILESTASH_EXCLUDE;
@@ -425,6 +435,7 @@ export const CHECKS: [string, Check][] = [
   ["mcp", checkMcpRegistration],
   ["hook", checkResetHook],
   ["hook-subagent-scope", checkSubagentScopeHook],
+  ["hook-oh-my-pi", checkOhMyPiExtension],
   ["env", checkEnv],
   ["updates", checkUpdates],
 ];

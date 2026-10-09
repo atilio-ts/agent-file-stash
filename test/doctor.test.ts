@@ -287,6 +287,12 @@ describe("MCP registration check", () => {
     expect(r).toMatchObject({ id: "mcp-opencode", status: "ok" });
   });
 
+  test("Oh My Pi config is checked", () => {
+    const c = newCase();
+    writeJson(join(c.home, ".omp", "agent", "mcp.json"), { mcpServers: { filestash: { command: process.execPath, args: ["serve"] } } });
+    expect(checkMcpRegistration(opts(c))[0]).toMatchObject({ id: "mcp-oh-my-pi", status: "ok" });
+  });
+
   test("invalid JSON warns", () => {
     const c = newCase();
     writeJson(join(c.home, ".claude.json"), "{broken");
@@ -468,7 +474,7 @@ describe("runner and formatting", () => {
   });
 
   test("the default check list covers every area", () => {
-    expect(CHECKS.map(([id]) => id)).toEqual(["node", "stash-dir", "database", "mcp", "hook", "hook-subagent-scope", "env", "updates"]);
+    expect(CHECKS.map(([id]) => id)).toEqual(["node", "stash-dir", "database", "mcp", "hook", "hook-subagent-scope", "hook-oh-my-pi", "env", "updates"]);
   });
 });
 

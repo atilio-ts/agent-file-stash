@@ -20,7 +20,7 @@ The stash persists in a local SQLite database (Node.js built-in `node:sqlite`, W
 ## Highlights
 
 - **Up to ~50% fewer tokens** on repeated reads in the two-pass simulation, 24–26% on a real codebase (see [Benchmark](#benchmark)). Savings only apply to re-reads, see [When it saves tokens](#when-it-saves-tokens-and-when-it-does-not)
-- **Zero config** — one command auto-configures Claude Code, Cursor, and OpenCode
+- **Zero config** — one command auto-configures Claude Code, Cursor, OpenCode, and Oh My Pi
 - **No external services** — SQLite backed by Node.js 24 built-ins, no network required
 - **Partial-read aware** — tracks which line ranges were delivered to the model; returns an "unchanged in lines 50-59" label only for lines it already delivered, when only other parts of the file changed
 - **Agents adopt it on their own** — tool descriptions alone are enough; no explicit instructions needed
@@ -34,7 +34,7 @@ The stash persists in a local SQLite database (Node.js built-in `node:sqlite`, W
 npx agent-file-stash init
 ```
 
-This auto-configures agent-file-stash for any editors it detects (Claude Code, Cursor, OpenCode). Restart your editor and agents will start using it automatically.
+This auto-configures agent-file-stash for any editors it detects (Claude Code, Cursor, OpenCode, Oh My Pi). Restart your editor and agents will start using it automatically.
 
 **Manual configuration** — add to your MCP config (`.claude.json`, `.cursor/mcp.json`, etc.):
 
@@ -79,6 +79,7 @@ Detects installed editors and writes the MCP server entry into each config file 
 | Claude Code | `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json` |
 | OpenCode | `$XDG_CONFIG_HOME/opencode/opencode.json` |
+| Oh My Pi | `~/.omp/agent/mcp.json` |
 
 `init` registers the server under the key `filestash` (inside `mcpServers`, or `mcp` for OpenCode). Only editors whose config directory exists are touched. If the `filestash` key already exists in a config, that entry is left unchanged and reported as "already configured". After running, restart your editor to pick up the new server.
 
@@ -92,6 +93,8 @@ Done! Restart your editor to pick up agent-file-stash.
 When no supported editor is detected, `init` prints the manual MCP snippet instead.
 
 `init --hooks` also merges the context-reset hook (see [Context resets](#context-resets)) and the subagent scope hook (see [Subagents](#subagents)) into `~/.claude/settings.json`. It is idempotent, keeps all existing settings, and saves the previous file as `settings.json.bak`. Without the flag, `init` only prints the snippet.
+
+When `~/.omp/agent` exists, `init --hooks` also writes the Oh My Pi extension to `~/.omp/agent/extensions/agent-file-stash.ts` (see [Oh My Pi](#oh-my-pi)). An existing file with different content is left untouched.
 
 #### `serve`
 
@@ -158,7 +161,7 @@ npx agent-file-stash doctor --json
 npx agent-file-stash doctor --check-updates
 ```
 
-Read-only diagnostics that tell you whether the install works and what to fix. It checks the Node version, the stash directory and database (schema version, integrity, permissions, leftover recovery files), the MCP registration in Claude Code, Cursor and OpenCode, the context-reset hook, the subagent scope hook, and the `FILESTASH_*` limits. It never creates, changes or deletes any file or setting (when a running server holds the database, SQLite may refresh the timestamp of its shared-memory index file `stash.db-shm`, as any reader does) and makes no network call unless you pass `--check-updates`, which compares the installed version with `npm view`. Each line is `[ok]`, `[warn]`, `[error]` or `[info]`, followed by a fix hint for warnings and errors; `--json` prints the same results as a JSON array and nothing else. The exit code is 1 when any check reports an error and 0 otherwise.
+Read-only diagnostics that tell you whether the install works and what to fix. It checks the Node version, the stash directory and database (schema version, integrity, permissions, leftover recovery files), the MCP registration in Claude Code, Cursor, OpenCode and Oh My Pi, the context-reset hook, the subagent scope hook, and the `FILESTASH_*` limits. It never creates, changes or deletes any file or setting (when a running server holds the database, SQLite may refresh the timestamp of its shared-memory index file `stash.db-shm`, as any reader does) and makes no network call unless you pass `--check-updates`, which compares the installed version with `npm view`. Each line is `[ok]`, `[warn]`, `[error]` or `[info]`, followed by a fix hint for warnings and errors; `--json` prints the same results as a JSON array and nothing else. The exit code is 1 when any check reports an error and 0 otherwise.
 
 #### `help`
 
@@ -237,6 +240,15 @@ For a call made by a subagent, Claude Code gives the hook the subagent's `agent_
 The hook only adds an argument. It emits no permission decision, so it never grants or bypasses a permission, and a `permissions.deny` rule still blocks the tool. Without the hook, subagents share the parent's tracking as before, and `force=true` on a subagent's first read of each file is the workaround. `doctor` reports a missing hook.
 
 Each session keeps at most 32 `agent` scopes; a read from a new scope beyond that deletes the tracking of the least recently used one, which then gets real content on its next read. Scoped tracking is removed together with its session when that session closes. SDK users pass `scope` to `readFile` and `readFileFull`; a value that is not 1-64 characters of `A-Za-z0-9_.-` is ignored, and session ids must not contain `::`.
+
+### Oh My Pi
+
+Oh My Pi subagents run in the parent process and reach MCP servers through the parent's connection, so they have the same shared-tracking problem as Claude Code subagents, and Oh My Pi has no Claude Code hooks. `init --hooks` installs an extension at `~/.omp/agent/extensions/agent-file-stash.ts` that:
+
+- adds the subagent's id (`ctx.agent.id`) as the `agent` argument of the stash's `read_file` and `read_files` tools, for subagent sessions only, so each subagent gets its own read tracking (see [Subagents](#subagents));
+- runs `reset` on `session_compact` and `session_switch`, the equivalent of the `SessionStart` hook in [Context resets](#context-resets).
+
+The extension matches the tool names `mcp__filestash_read_file`, `mcp__filestash_read_files` and the same names under a server called `agent-file-stash`. If you registered the server under another name, edit the pattern at the top of the file. Errors inside the extension are swallowed, so it never blocks a tool call. `doctor` reports a missing extension.
 
 ### How sessions work
 
@@ -486,6 +498,7 @@ Remove the `agent-file-stash` entry from each config file where `init` added it:
 | Claude Code | `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json` |
 | OpenCode | `$XDG_CONFIG_HOME/opencode/opencode.json` |
+| Oh My Pi | `~/.omp/agent/mcp.json` |
 
 Delete the `"filestash"` key (the one `init` adds; also `"agent-file-stash"` if you configured it by hand) from the `mcpServers` object in each file (the `mcp` object for OpenCode), then restart your editor.
 
